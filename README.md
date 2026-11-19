@@ -67,9 +67,9 @@ The top right shows `RAW` (no zero), `ZEROING` (averaging after a press) or `ZER
 
 ## Zero button (toggle)
 
-- **First press:** hold the sensor still for 100 ms. The sketch averages 160 readings and uses that average as the new zero for X, Y and Z. That also removes the 1 g of gravity on whichever axis points up.
+- **First press:** hold the sensor still for 100 ms. The sketch averages 160 Z readings and uses that as the new zero for **Z only**, so Z goes from about 1 g (gravity) to 0 g. X and Y are never offset.
 - **Next press:** turns the zero off and goes back to raw values. Each press after that toggles again.
-- The zero isn't remembered. Every reset (RST or power-up) starts with raw values. Toggling in the middle of a run shifts all the values that follow in that file.
+- The zero isn't remembered. Every reset (RST or power-up) starts with raw values. While the zero is off, Z shows the raw reading, about 1 g with the sensor flat. Toggling in the middle of a run shifts all the values that follow in that file.
 
 ## Output
 
@@ -91,7 +91,7 @@ RTC: 2026-11-19 09:30:00
 ADXL375 DEVID: 0xE5
 Logging to /20261119_093000.csv
 X=   0.05 g  Y=  -0.10 g  Z=   1.03 g  samples=812
-Zero ON. Offsets (counts): 1.2 -2.0 20.6
+Zero ON. Z offset: 20.6 counts (1.01 g)
 X=   0.00 g  Y=   0.05 g  Z=   0.00 g  samples=1612
 Zero OFF (raw values).
 ```

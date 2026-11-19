@@ -8,7 +8,8 @@
 //   3. Creates a new CSV file on the SD card and writes one line per sample.
 //   4. Shows the date, clock and live X/Y/Z values on the OLED.
 //   5. The zero button (GPIO32, e.g. base board KEY1) TOGGLES the zero: first press averages
-//      100 ms of readings and uses them as the new zero for X, Y and Z, next press goes back
+//      100 ms of Z readings and uses them as the new zero for Z ONLY (X and Y are always raw),
+//      so Z reads ~0 g instead of ~1 g of gravity. Next press goes back
 //      to raw values, and so on. The zero is NOT remembered: every reset starts raw.
 //   6. Every NEW upload sets the RTC to the compile time. For an exact second, type the time
 //      in Serial Monitor (115200, line ending "Newline") as  YYYY-MM-DD HH:MM:SS  and press
@@ -84,10 +85,10 @@ uint32_t nextSampleUs, lastFlushMs, lastPrintMs, sampleCount;
 int64_t bootEpoch, bootTimerUs;  // RTC time at boot + matching esp_timer value
 
 // ---- Zero (offset) state ----
-float offX, offY, offZ;          // zero offsets in raw counts, back to 0 on every reset
+float offZ;                      // Z zero offset in raw counts (X/Y are never offset), back to 0 on every reset
 bool zeroed = false;             // toggled by the zero button; false = raw values
 int zeroN = -1;                  // >= 0 while averaging for a zero
-int32_t sumX, sumY, sumZ;        // running sums while averaging
+int32_t sumZ;                    // running Z sum while averaging
 
 // Latest values for the display task (core 0); written by loop() (core 1)
 volatile float dispX, dispY, dispZ;
@@ -407,26 +408,26 @@ void loop() {
     if (btn == BTN_PRESSED && zeroN < 0) {
       if (zeroed) {                               // zero on -> off: back to raw values
         zeroed = false;
-        offX = offY = offZ = 0;
+        offZ = 0;
         Serial.println("Zero OFF (raw values).");
       } else {
-        zeroN = 0; sumX = sumY = sumZ = 0;        // zero off -> on: start averaging
+        zeroN = 0; sumZ = 0;                      // zero off -> on: start averaging
       }
     }
   }
   if (zeroN >= 0) {
-    sumX += rx; sumY += ry; sumZ += rz;
+    sumZ += rz;
     if (++zeroN == ZERO_SAMPLES) {
-      offX = sumX / (float)ZERO_SAMPLES; offY = sumY / (float)ZERO_SAMPLES; offZ = sumZ / (float)ZERO_SAMPLES;
-      Serial.printf("Zero ON. Offsets (counts): %.1f %.1f %.1f\n", offX, offY, offZ);
+      offZ = sumZ / (float)ZERO_SAMPLES;
+      Serial.printf("Zero ON. Z offset: %.1f counts (%.2f g)\n", offZ, offZ * G_PER_LSB);
       zeroed = true;
       zeroN = -1;                                 // done
     }
   }
 
   // Raw counts -> g, after removing the zero offset
-  float x = (rx - offX) * G_PER_LSB;
-  float y = (ry - offY) * G_PER_LSB;
+  float x = rx * G_PER_LSB;                       // X and Y are always raw
+  float y = ry * G_PER_LSB;
   float z = (rz - offZ) * G_PER_LSB;
   dispX = x; dispY = y; dispZ = z;                // hand the latest values to the OLED task
 
