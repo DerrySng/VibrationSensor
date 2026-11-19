@@ -15,7 +15,7 @@
 //      in Serial Monitor (115200, line ending "Newline") as  YYYY-MM-DD HH:MM:SS  and press
 //      Enter on that second; the RTC is set and the ESP32 restarts with a new log file.
 //
-// Libraries (Library Manager): "Adafruit SSD1306" (pulls in Adafruit GFX + BusIO) and "Ds1302" by Rafa Couto.
+// Libraries (Library Manager): "Adafruit SSD1306" (pulls in Adafruit GFX + BusIO).
 // Everything else ships with the ESP32 board package.
 //
 // Each boot creates a new file named from the RTC, e.g. /20261118_093000.csv
@@ -28,7 +28,6 @@
 #include <Wire.h>              // I2C bus (OLED)
 #include <Adafruit_GFX.h>      // text drawing for the OLED
 #include <Adafruit_SSD1306.h>  // OLED driver
-#include <Ds1302.h>          // "Ds1302" by Rafa Couto (Library Manager)
 #include <Preferences.h>       // small store in flash: remembers which build last set the RTC
 #include <time.h>              // struct tm, mktime, gmtime_r
 #include "esp_timer.h"         // 64-bit microsecond timer (does not wrap like micros())
@@ -120,31 +119,72 @@ void adxlRead(uint8_t reg, uint8_t *buf, uint8_t len) {
   adxlSPI.endTransaction();
 }
 
-// ================= DS1302 (Ds1302 library by Rafa Couto) =================
-Ds1302 rtc(RTC_CE, RTC_CLK, RTC_IO);
+// ================= DS1302 (3-wire, LSB first) =================
+// The pins are bit-banged by hand because the DS1302 is not real SPI (one shared data line, LSB first).
+
+// Send one byte, lowest bit first. If thenRead is true, the RTC will answer right after,
+// so the data pin is switched to input before the last clock falls.
+void rtcWriteByte(uint8_t b, bool thenRead = false) {
+  pinMode(RTC_IO, OUTPUT);
+  for (int i = 0; i < 8; i++) {
+    digitalWrite(RTC_IO, b & 1);
+    b >>= 1;
+    delayMicroseconds(1);
+    digitalWrite(RTC_CLK, HIGH);   // RTC latches the bit on the rising edge
+    delayMicroseconds(1);
+    if (thenRead && i == 7) pinMode(RTC_IO, INPUT);  // release I/O before the RTC drives it
+    digitalWrite(RTC_CLK, LOW);
+  }
+}
+
+// Receive one byte, lowest bit first. The RTC puts each bit out on the falling clock edge.
+uint8_t rtcReadByte() {
+  uint8_t b = 0;
+  for (int i = 0; i < 8; i++) {
+    delayMicroseconds(1);
+    b |= digitalRead(RTC_IO) << i;
+    digitalWrite(RTC_CLK, HIGH);
+    delayMicroseconds(1);
+    digitalWrite(RTC_CLK, LOW);
+  }
+  return b;
+}
+
+// Start (on = true) or end (on = false) a transfer. Clock must be low when CE changes.
+void rtcSelect(bool on) {
+  digitalWrite(RTC_CLK, LOW);
+  digitalWrite(RTC_CE, on);
+  delayMicroseconds(4);
+}
+
+// The DS1302 stores numbers as BCD: 0x59 means 59.
+uint8_t bcd2dec(uint8_t v) { return (v >> 4) * 10 + (v & 0x0F); }
+uint8_t dec2bcd(uint8_t v) { return ((v / 10) << 4) | (v % 10); }
 
 // Wait (up to 1.1 s) for the RTC's seconds to tick over, so the next read lands right at the
 // start of a second. Without this the boot time could be up to 1 s off.
 void rtcWaitForTick() {
-  Ds1302::DateTime d;
-  rtc.getDateTime(&d);
-  uint8_t s0 = d.second;
+  auto sec = []() { rtcSelect(true); rtcWriteByte(0x81, true); uint8_t v = rtcReadByte(); rtcSelect(false); return v; };
+  uint8_t s0 = sec();
   uint32_t start = millis();
-  do { rtc.getDateTime(&d); } while (d.second == s0 && millis() - start < 1100);
+  while (sec() == s0 && millis() - start < 1100) {}
 }
 
 // Read date and time into t. Returns false if the clock is stopped or not connected.
 bool rtcRead(struct tm &t) {
-  if (rtc.isHalted()) return false;          // clock halted (new / battery lost)
-  Ds1302::DateTime d;
-  rtc.getDateTime(&d);
+  uint8_t r[7];                             // sec, min, hour, date, month, weekday, year
+  rtcSelect(true);
+  rtcWriteByte(0xBF, true);                 // clock burst read
+  for (int i = 0; i < 7; i++) r[i] = rtcReadByte();
+  rtcSelect(false);
+  if (r[0] & 0x80) return false;            // clock halted (new / battery lost)
   t = {};
-  t.tm_sec  = d.second;
-  t.tm_min  = d.minute;
-  t.tm_hour = d.hour;                        // 24 h mode (we always write 24 h)
-  t.tm_mday = d.day;
-  t.tm_mon  = d.month - 1;                   // struct tm months are 0-11
-  t.tm_year = d.year + 100;                  // 2000-2099
+  t.tm_sec  = bcd2dec(r[0] & 0x7F);
+  t.tm_min  = bcd2dec(r[1] & 0x7F);
+  t.tm_hour = bcd2dec(r[2] & 0x3F);          // 24 h mode (we always write 24 h)
+  t.tm_mday = bcd2dec(r[3] & 0x3F);
+  t.tm_mon  = bcd2dec(r[4] & 0x1F) - 1;      // struct tm months are 0-11
+  t.tm_year = bcd2dec(r[6]) + 100;           // 2000-2099
   // All-0xFF / garbage (RTC not connected) fails these checks
   return t.tm_sec < 60 && t.tm_min < 60 && t.tm_hour < 24 &&
          t.tm_mday >= 1 && t.tm_mday <= 31 && t.tm_mon >= 0 && t.tm_mon < 12;
@@ -152,9 +192,18 @@ bool rtcRead(struct tm &t) {
 
 // Set the RTC to t and start it running.
 void rtcWrite(const struct tm &t) {
-  Ds1302::DateTime d = { (uint8_t)(t.tm_year - 100), (uint8_t)(t.tm_mon + 1), (uint8_t)t.tm_mday,
-                         (uint8_t)t.tm_hour, (uint8_t)t.tm_min, (uint8_t)t.tm_sec, (uint8_t)(t.tm_wday + 1) };
-  rtc.setDateTime(&d);
+  rtcSelect(true); rtcWriteByte(0x8E); rtcWriteByte(0x00); rtcSelect(false);  // write-protect off
+  rtcSelect(true);
+  rtcWriteByte(0xBE);                       // clock burst write (all 8 bytes)
+  rtcWriteByte(dec2bcd(t.tm_sec));          // bit7 = 0 -> clock runs
+  rtcWriteByte(dec2bcd(t.tm_min));
+  rtcWriteByte(dec2bcd(t.tm_hour));
+  rtcWriteByte(dec2bcd(t.tm_mday));
+  rtcWriteByte(dec2bcd(t.tm_mon + 1));
+  rtcWriteByte(dec2bcd(t.tm_wday + 1));
+  rtcWriteByte(dec2bcd(t.tm_year - 100));
+  rtcWriteByte(0x00);                       // control: write-protect stays off
+  rtcSelect(false);
 }
 
 // The time this sketch was compiled (from the __DATE__ and __TIME__ macros), used to
@@ -224,7 +273,8 @@ void setup() {
 
   // RTC pins: CE low = RTC ignores the bus
   pinMode(SD_CS, OUTPUT);  digitalWrite(SD_CS, HIGH);   // keep the SD card deselected
-  rtc.init();
+  pinMode(RTC_CE, OUTPUT); digitalWrite(RTC_CE, LOW);
+  pinMode(RTC_CLK, OUTPUT); digitalWrite(RTC_CLK, LOW);
   struct tm now;
   rtcWaitForTick();
   bool rtcOk = rtcRead(now);
