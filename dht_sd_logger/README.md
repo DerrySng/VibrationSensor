@@ -59,16 +59,24 @@ The date and clock update every second, temperature and humidity every 2 s. `DHT
 One line every 2 s, flushed to the card each time, in a file named after the boot time (e.g. `/20261119_093000.csv`, or `/log_000.csv` without an RTC):
 
 ```
-epoch_s,datetime,temp_c,humidity_pct
-1763544600,2026-11-19 09:30:00,24.0,55.0
-1763544602,2026-11-19 09:30:02,24.0,0.0
+datetime,temp_c,humidity_pct
+2026-11-19 09:30:00,24.0,55.0
+2026-11-19 09:30:02,24.0,0.0
 ```
 
 A failed sensor read is logged as `nan`, so you can still see the logger is running with the sensor unplugged.
 
-## Setting the RTC
+## Setting the RTC (accurate to the second)
 
-Same as the ADXL375 logger: a new RTC is set to the compile time automatically. To set it again, change `FORCE_SET_RTC = true`, upload, then set it back to `false` and upload again.
+1. Open Serial Monitor at 115200 baud, with the line ending set to **Newline** (or Both NL & CR).
+2. Type the time to set, a few seconds ahead of a reference clock (e.g. time.is), as `YYYY-MM-DD HH:MM:SS`, e.g. `2026-11-19 11:15:00`.
+3. Press Enter exactly when the reference clock reaches that second.
+
+The sketch writes the time to the RTC and restarts, and logging continues in a new file named with the correct time. A wrong format prints `Time not understood` and changes nothing.
+
+At each boot the sketch waits for the RTC's seconds to tick over before reading it, so the log starts on the exact second. After setting, expect a drift of about 1 to 2 s a day from the DS1302 crystal. Re-set it every week or two if you need it to stay within a second.
+
+A brand-new RTC, or one whose battery was removed, is still set automatically to the compile time, which is usually 30 to 60 s behind. Correct it with the steps above. `FORCE_SET_RTC` still works as before.
 
 ## Expected Serial output (115200 baud)
 

@@ -19,7 +19,11 @@
 //
 // Each boot creates a new file named from the RTC, e.g. /20261119_093000.csv
 // (falls back to /log_000.csv ... if the RTC is missing).
-// Columns: epoch_s, datetime, temp_c, humidity_pct (humidity_pct has the zero offset removed)
+// Columns: datetime, temp_c, humidity_pct (humidity_pct has the zero offset removed)
+//
+// Setting the clock to the second: open Serial Monitor (115200, line ending "Newline"),
+// type the time as  YYYY-MM-DD HH:MM:SS  and press Enter exactly as your reference clock
+// reaches that second. The RTC is set and the ESP32 restarts with a new log file.
 // =====================================================================================
 
 #include <SPI.h>               // SPI bus (SD card)
@@ -116,6 +120,15 @@ void rtcSelect(bool on) {
 // The DS1302 stores numbers as BCD: 0x59 means 59.
 uint8_t bcd2dec(uint8_t v) { return (v >> 4) * 10 + (v & 0x0F); }
 uint8_t dec2bcd(uint8_t v) { return ((v / 10) << 4) | (v % 10); }
+
+// Wait (up to 1.1 s) for the RTC's seconds to tick over, so the next read lands right at the
+// start of a second. Without this the boot time could be up to 1 s off.
+void rtcWaitForTick() {
+  auto sec = []() { rtcSelect(true); rtcWriteByte(0x81, true); uint8_t v = rtcReadByte(); rtcSelect(false); return v; };
+  uint8_t s0 = sec();
+  uint32_t start = millis();
+  while (sec() == s0 && millis() - start < 1100) {}
+}
 
 // Read date and time into t. Returns false if the clock is stopped or not connected.
 bool rtcRead(struct tm &t) {
@@ -230,6 +243,7 @@ void setup() {
   pinMode(RTC_CE, OUTPUT); digitalWrite(RTC_CE, LOW);
   pinMode(SD_SCK, OUTPUT); digitalWrite(SD_SCK, LOW);
   struct tm now;
+  rtcWaitForTick();
   bool rtcOk = rtcRead(now);
   if (!rtcOk || FORCE_SET_RTC) {
     // New RTC or flat battery: start it at the compile time, then read it back to check
@@ -264,16 +278,51 @@ void setup() {
   }
   logFile = SD.open(logPath, FILE_WRITE);
   if (!logFile) halt("ERROR: could not create log file.");
-  logFile.println("epoch_s,datetime,temp_c,humidity_pct");  // CSV header
+  logFile.println("datetime,temp_c,humidity_pct");  // CSV header
   logFile.flush();
   Serial.printf("Logging to %s\n", logPath);
 
   lastReadMs = millis() - READ_INTERVAL_MS;  // take the first reading straight away
 }
 
+// Set the RTC from a line typed in Serial Monitor: "YYYY-MM-DD HH:MM:SS".
+// The RTC shares pins with the SD card, so: close the file, release the SPI bus,
+// write the RTC, then restart. The new boot reads the fresh time and starts a new file.
+void checkSerialTimeSet() {
+  static char line[24];
+  static uint8_t len;
+  while (Serial.available()) {
+    char c = Serial.read();
+    if (c != '\n' && c != '\r') { if (len < sizeof(line) - 1) line[len++] = c; continue; }
+    if (len == 0) continue;               // ignore the extra \r or \n of a CR+LF line ending
+    line[len] = 0;
+    len = 0;
+    struct tm t = {};
+    if (sscanf(line, "%d-%d-%d %d:%d:%d", &t.tm_year, &t.tm_mon, &t.tm_mday,
+               &t.tm_hour, &t.tm_min, &t.tm_sec) != 6 || t.tm_year < 2000 || t.tm_year > 2099 ||
+        t.tm_mon < 1 || t.tm_mon > 12 || t.tm_mday < 1 || t.tm_mday > 31 ||
+        t.tm_hour > 23 || t.tm_min > 59 || t.tm_sec > 59) {
+      Serial.println("Time not understood. Type it as YYYY-MM-DD HH:MM:SS");
+      continue;
+    }
+    t.tm_year -= 1900; t.tm_mon -= 1;
+    mktime(&t);                           // fills in tm_wday
+    logFile.close();                      // nothing is lost: every line is already flushed
+    SD.end();
+    SPI.end();                            // give SCK/MOSI back so they can be bit-banged
+    pinMode(SD_CS, OUTPUT);  digitalWrite(SD_CS, HIGH);
+    pinMode(SD_SCK, OUTPUT); digitalWrite(SD_SCK, LOW);
+    rtcWrite(t);
+    Serial.printf("RTC set to %s. Restarting...\n", line);
+    delay(100);
+    ESP.restart();
+  }
+}
+
 // ================= loop(): check the button all the time, log every 2 s =================
 void loop() {
   uint32_t ms = millis();
+  checkSerialTimeSet();
 
   // Button: LOW = pressed (the external pull-up holds it HIGH otherwise). 50 ms debounce.
   static bool lastBtn = HIGH;
@@ -307,12 +356,12 @@ void loop() {
   lastRawH = hum;
   hum -= humOff;                      // zeroed humidity (NAN stays NAN)
 
-  // One CSV line: "epoch,YYYY-MM-DD HH:MM:SS,temp,humidity". A failed read logs "nan"
+  // One CSV line: "YYYY-MM-DD HH:MM:SS,temp,humidity". A failed read logs "nan"
   // so you can still see the logger is running while the sensor is unplugged.
   time_t tt = nowEpoch();
   struct tm t;
   gmtime_r(&tt, &t);
-  logFile.printf("%ld,%04d-%02d-%02d %02d:%02d:%02d,%.1f,%.1f\n", (long)tt,
+  logFile.printf("%04d-%02d-%02d %02d:%02d:%02d,%.1f,%.1f\n",
                  t.tm_year + 1900, t.tm_mon + 1, t.tm_mday, t.tm_hour, t.tm_min, t.tm_sec,
                  tC, hum);
   logFile.flush();                    // only one line every 2 s, so flush each time: a power cut loses nothing
