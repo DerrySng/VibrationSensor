@@ -59,9 +59,9 @@ The date and clock update every second, temperature and humidity every 2 s. `DHT
 One line every 2 s, flushed to the card each time, in a file named after the boot time (e.g. `/20261119_093000.csv`, or `/log_000.csv` without an RTC):
 
 ```
-datetime,temp_c,humidity_pct
-2026-11-19 09:30:00,24.0,55.0
-2026-11-19 09:30:02,24.0,0.0
+date,time,temp_c,humidity_pct
+2026-11-19,09:30:00,24.0,55.0
+2026-11-19,09:30:02,24.0,0.0
 ```
 
 A failed sensor read is logged as `nan`, so you can still see the logger is running with the sensor unplugged.

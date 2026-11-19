@@ -19,7 +19,7 @@
 //
 // Each boot creates a new file named from the RTC, e.g. /20261119_093000.csv
 // (falls back to /log_000.csv ... if the RTC is missing).
-// Columns: datetime, temp_c, humidity_pct (humidity_pct has the zero offset removed)
+// Columns: date, time, temp_c, humidity_pct (humidity_pct has the zero offset removed)
 //
 // Setting the clock to the second: open Serial Monitor (115200, line ending "Newline"),
 // type the time as  YYYY-MM-DD HH:MM:SS  and press Enter exactly as your reference clock
@@ -278,7 +278,7 @@ void setup() {
   }
   logFile = SD.open(logPath, FILE_WRITE);
   if (!logFile) halt("ERROR: could not create log file.");
-  logFile.println("datetime,temp_c,humidity_pct");  // CSV header
+  logFile.println("date,time,temp_c,humidity_pct");  // CSV header
   logFile.flush();
   Serial.printf("Logging to %s\n", logPath);
 
@@ -356,12 +356,12 @@ void loop() {
   lastRawH = hum;
   hum -= humOff;                      // zeroed humidity (NAN stays NAN)
 
-  // One CSV line: "YYYY-MM-DD HH:MM:SS,temp,humidity". A failed read logs "nan"
+  // One CSV line: "YYYY-MM-DD,HH:MM:SS,temp,humidity" (separate date and time columns). A failed read logs "nan"
   // so you can still see the logger is running while the sensor is unplugged.
   time_t tt = nowEpoch();
   struct tm t;
   gmtime_r(&tt, &t);
-  logFile.printf("%04d-%02d-%02d %02d:%02d:%02d,%.1f,%.1f\n",
+  logFile.printf("%04d-%02d-%02d,%02d:%02d:%02d,%.1f,%.1f\n",
                  t.tm_year + 1900, t.tm_mon + 1, t.tm_mday, t.tm_hour, t.tm_min, t.tm_sec,
                  tC, hum);
   logFile.flush();                    // only one line every 2 s, so flush each time: a power cut loses nothing
