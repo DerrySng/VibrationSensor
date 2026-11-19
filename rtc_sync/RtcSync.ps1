@@ -17,7 +17,7 @@ Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 
 $BAUD = 115200
-$READY_TIMEOUT_S = 40   # the ADXL375 logger can spend ~20 s trying WiFi/NTP after a reboot
+$READY_TIMEOUT_S = 40   # time for the board to reboot and finish setup after the port opens
 
 # ---------- window ----------
 $form = New-Object System.Windows.Forms.Form

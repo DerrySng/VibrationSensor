@@ -15,7 +15,7 @@
 //      in Serial Monitor (115200, line ending "Newline") as  YYYY-MM-DD HH:MM:SS  and press
 //      Enter on that second; the RTC is set and the ESP32 restarts with a new log file.
 //
-// Libraries (Library Manager): "Adafruit SSD1306" (pulls in Adafruit GFX + BusIO).
+// Libraries (Library Manager): "Adafruit SSD1306" (pulls in Adafruit GFX + BusIO) and "Ds1302" by Rafa Couto.
 // Everything else ships with the ESP32 board package.
 //
 // Each boot creates a new file named from the RTC, e.g. /20261118_093000.csv

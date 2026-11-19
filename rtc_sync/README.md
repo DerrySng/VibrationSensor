@@ -9,7 +9,7 @@ Sets the logger's DS1302 RTC to your PC's clock, accurate to a fraction of a sec
 3. Pick the board's COM port (the newest one is pre-selected; press Refresh if you plugged in after opening) and press **Sync RTC**.
 4. Wait for `Done.` The board restarts with the new time and starts a new log file.
 
-Opening the port may reboot the board, so the app waits up to 40 s for the logger to start (the ADXL375 logger can spend ~20 s trying WiFi/NTP first). It then picks a whole second, waits for it on the PC clock, and sends `YYYY-MM-DD HH:MM:SS`, the same command you could type in Serial Monitor.
+Opening the port may reboot the board, so the app waits up to 40 s for the logger to start. It then picks a whole second, waits for it on the PC clock, and sends `YYYY-MM-DD HH:MM:SS`, the same command you could type in Serial Monitor.
 
 To make sure the PC clock itself is right: Windows Settings > Time & language > Date & time > **Sync now**.
 

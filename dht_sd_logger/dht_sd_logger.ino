@@ -16,6 +16,7 @@
 // Libraries (Library Manager):
 //   - "Adafruit SSD1306" (pulls in Adafruit GFX + BusIO)
 //   - "DHT sensor library" by Adafruit (pulls in Adafruit Unified Sensor)
+//   - "Ds1302" by Rafa Couto (RTC)
 //
 // Each boot creates a new file named from the RTC, e.g. /20261119_093000.csv
 // (falls back to /log_000.csv ... if the RTC is missing).
