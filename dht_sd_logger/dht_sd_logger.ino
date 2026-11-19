@@ -42,8 +42,11 @@ const int SD_SCK    = 18;
 const int SD_MISO   = 19;
 const int SD_MOSI   = 23;
 const int SD_CS     = 4;    // base board TF slot is hardwired to GPIO4
-// DS1302 RTC: SCLK -> SD_SCK, I/O -> SD_MOSI, CE (RST) on its own pin
-const int RTC_CE    = 25;
+// DS1302 RTC on its own 3 pins (no longer shared with the SD card).
+// 16/17 only go to the base board's servo headers and LCD socket: leave those empty.
+const int RTC_CLK   = 16;   // DS1302 CLK (SCLK)
+const int RTC_IO    = 17;   // DS1302 DAT (I/O)
+const int RTC_CE    = 25;   // DS1302 RST (CE)
 // SSD1306 OLED (I2C): wire with jumper leads, NOT the board's OLED socket (that uses SD's 18/23)
 const int OLED_SDA  = 21;
 const int OLED_SCL  = 22;
@@ -80,22 +83,20 @@ float lastT = NAN, lastH = NAN;  // latest temperature and zeroed humidity, show
 bool zeroed = false;             // toggled by each button press; false = raw humidity
 
 // ================= DS1302 (3-wire, LSB first) =================
-// Only used in setup(), BEFORE the SD card takes over SCK/MOSI. With CE low the DS1302
-// ignores the bus, and with SD_CS high the card ignores the RTC traffic.
 // The pins are bit-banged by hand because the DS1302 is not real SPI (one shared data line, LSB first).
 
 // Send one byte, lowest bit first. If thenRead is true, the RTC will answer right after,
 // so the data pin is switched to input before the last clock falls.
 void rtcWriteByte(uint8_t b, bool thenRead = false) {
-  pinMode(SD_MOSI, OUTPUT);
+  pinMode(RTC_IO, OUTPUT);
   for (int i = 0; i < 8; i++) {
-    digitalWrite(SD_MOSI, b & 1);
+    digitalWrite(RTC_IO, b & 1);
     b >>= 1;
     delayMicroseconds(1);
-    digitalWrite(SD_SCK, HIGH);   // RTC latches the bit on the rising edge
+    digitalWrite(RTC_CLK, HIGH);   // RTC latches the bit on the rising edge
     delayMicroseconds(1);
-    if (thenRead && i == 7) pinMode(SD_MOSI, INPUT);  // release I/O before the RTC drives it
-    digitalWrite(SD_SCK, LOW);
+    if (thenRead && i == 7) pinMode(RTC_IO, INPUT);  // release I/O before the RTC drives it
+    digitalWrite(RTC_CLK, LOW);
   }
 }
 
@@ -104,17 +105,17 @@ uint8_t rtcReadByte() {
   uint8_t b = 0;
   for (int i = 0; i < 8; i++) {
     delayMicroseconds(1);
-    b |= digitalRead(SD_MOSI) << i;
-    digitalWrite(SD_SCK, HIGH);
+    b |= digitalRead(RTC_IO) << i;
+    digitalWrite(RTC_CLK, HIGH);
     delayMicroseconds(1);
-    digitalWrite(SD_SCK, LOW);
+    digitalWrite(RTC_CLK, LOW);
   }
   return b;
 }
 
 // Start (on = true) or end (on = false) a transfer. Clock must be low when CE changes.
 void rtcSelect(bool on) {
-  digitalWrite(SD_SCK, LOW);
+  digitalWrite(RTC_CLK, LOW);
   digitalWrite(RTC_CE, on);
   delayMicroseconds(4);
 }
@@ -220,7 +221,7 @@ void halt(const char *msg) {
 }
 
 // ================= setup(): runs once at power-on =================
-// Order matters: OLED first (to show errors), RTC before the SD card (they share pins).
+// OLED first, so errors can be shown on it.
 void setup() {
   Serial.begin(115200);
   delay(500);
@@ -235,10 +236,10 @@ void setup() {
   if (oledOk) { oled.setTextColor(SSD1306_WHITE); oled.clearDisplay(); oled.display(); }
   else Serial.println("WARNING: OLED not found, continuing without display.");
 
-  // RTC: talk to it on the SD lines BEFORE SPI/SD take them over
+  // RTC pins (CE low = RTC ignores the bus)
   pinMode(SD_CS, OUTPUT);  digitalWrite(SD_CS, HIGH);   // keep the SD card deselected
   pinMode(RTC_CE, OUTPUT); digitalWrite(RTC_CE, LOW);
-  pinMode(SD_SCK, OUTPUT); digitalWrite(SD_SCK, LOW);
+  pinMode(RTC_CLK, OUTPUT); digitalWrite(RTC_CLK, LOW);
   struct tm now;
   rtcWaitForTick();
   bool rtcOk = rtcRead(now);
@@ -267,7 +268,7 @@ void setup() {
     Serial.println("WARNING: RTC not found, timestamps are seconds since boot.");
   }
 
-  // SD card on VSPI (takes over SD_SCK / SD_MOSI from here on)
+  // SD card on VSPI
   SPI.begin(SD_SCK, SD_MISO, SD_MOSI, -1);
   if (!SD.begin(SD_CS, SPI)) halt("ERROR: SD card mount failed. Check card (FAT32) and wiring.");
 
@@ -291,8 +292,7 @@ void setup() {
 }
 
 // Set the RTC from a line typed in Serial Monitor: "YYYY-MM-DD HH:MM:SS".
-// The RTC shares pins with the SD card, so: close the file, release the SPI bus,
-// write the RTC, then restart. The new boot reads the fresh time and starts a new file.
+// Write the RTC, then restart: the new boot reads the fresh time and starts a new file.
 void checkSerialTimeSet() {
   static char line[24];
   static uint8_t len;
@@ -312,11 +312,7 @@ void checkSerialTimeSet() {
     }
     t.tm_year -= 1900; t.tm_mon -= 1;
     mktime(&t);                           // fills in tm_wday
-    logFile.close();                      // nothing is lost: every line is already flushed
-    SD.end();
-    SPI.end();                            // give SCK/MOSI back so they can be bit-banged
-    pinMode(SD_CS, OUTPUT);  digitalWrite(SD_CS, HIGH);
-    pinMode(SD_SCK, OUTPUT); digitalWrite(SD_SCK, LOW);
+    logFile.close();                      // close the file cleanly before the restart
     rtcWrite(t);
     Serial.printf("RTC set to %s. Restarting...\n", line);
     delay(100);

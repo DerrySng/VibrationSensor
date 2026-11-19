@@ -15,7 +15,7 @@ Using a DHT22 instead? Change `#define DHT_TYPE DHT11` to `DHT22`.
 | DHT11 | VCC / GND | 3V3 / GND | Or plug it into the base board's DHT11 socket (J4) |
 | | DATA | GPIO27 | Same pin as the kit's DHT11 example. J4 already has a 10k pull-up; jumper J4's signal to GPIO27. A bare DHT11 (not on a module or J4) needs a 10k from DATA to 3V3 |
 | SD card | SCK / MISO / MOSI / CS | 18 / 19 / 23 / 4 | Base board TF slot, hardwired |
-| DS1302 RTC | CLK / DAT / RST(CE) | 18 / 23 / 25 | Shares SD SCK/MOSI, read once at boot (same as the ADXL375 logger) |
+| DS1302 RTC | CLK / DAT / RST(CE) | 16 / 17 / 25 | Own pins (same as the ADXL375 logger). Leave the servo headers and LCD socket (16/17) empty. Fit a CR2032 backup cell |
 | SSD1306 OLED | SDA / SCL | 21 / 22 | Jumper leads, not the board's OLED socket |
 | Zero button (humidity) | one leg | GPIO32 | e.g. base board KEY1. No resistor needed (internal pull-up) |
 | | other leg | GND | KEY1 already goes to GND on the base board |
