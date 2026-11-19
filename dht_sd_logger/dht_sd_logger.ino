@@ -9,7 +9,7 @@
 //   2. Creates a new CSV file on the SD card.
 //   3. Every 2 seconds reads temperature + humidity and writes one CSV line.
 //   4. Shows the time, temperature and humidity on the OLED.
-//   5. The zero button (GPIO35) TOGGLES a humidity-only zero: first press makes the humidity
+//   5. The zero button (GPIO32, e.g. KEY1) TOGGLES a humidity-only zero: first press makes the humidity
 //      at that moment the new 0 %, next press goes back to raw, and so on. Temperature is never changed. The zero is NOT
 //      remembered: every reset (RST button or power-up) starts again from raw humidity.
 //
@@ -51,11 +51,12 @@ const uint8_t OLED_ADDR = 0x3C;  // some modules use 0x3D
 // DHT data line. 27 is what the kit's own DHT11 example uses (free now the ADXL375 is gone).
 // The base board's DHT11 socket (J4) already has a 10k pull-up; jumper its signal pin to GPIO27.
 const int DHT_PIN   = 27;
-// Zero button (humidity only) on GPIO35, ACTIVE HIGH: pressed = HIGH.
-// Wire the button between GPIO35 and 3V3. GPIO35 is input-only with NO internal pull-down,
-// so add a 10k resistor from GPIO35 to GND to hold it LOW when the button is released.
-const int ZERO_BTN  = 35;
-const int BTN_PRESSED = HIGH;  // change to LOW for a button to GND with a pull-up
+// Zero button (humidity only) on GPIO32. GPIO32 has internal pull-up AND pull-down resistors,
+// so no external resistor is needed. The sketch picks the right one from BTN_PRESSED:
+//   LOW  (default): button between GPIO32 and GND, e.g. base board KEY1. Internal pull-up.
+//   HIGH          : button between GPIO32 and 3V3. Internal pull-down.
+const int ZERO_BTN  = 32;
+const int BTN_PRESSED = LOW;
 // ---- end of pins ----
 
 // ---- Settings ----
@@ -225,7 +226,7 @@ void setup() {
   delay(500);
   Serial.println("\nDHT SD logger (dummy tester)");
 
-  pinMode(ZERO_BTN, INPUT);  // plain INPUT: GPIO35 has no internal pull resistors, the external 10k does the job
+  pinMode(ZERO_BTN, BTN_PRESSED == LOW ? INPUT_PULLUP : INPUT_PULLDOWN);  // holds the pin at "not pressed"
   dht.begin();
 
   // OLED first, so later errors can be shown on it. Logging still works without it.
@@ -328,7 +329,7 @@ void loop() {
   uint32_t ms = millis();
   checkSerialTimeSet();
 
-  // Button: BTN_PRESSED (HIGH) = pressed, the external pull-down holds it LOW otherwise. 50 ms debounce.
+  // Button: reads BTN_PRESSED while pressed; the internal pull resistor holds it at the other level. 50 ms debounce.
   static int lastBtn = !BTN_PRESSED;
   static uint32_t lastBtnMs;
   int btn = digitalRead(ZERO_BTN);
