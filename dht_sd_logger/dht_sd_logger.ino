@@ -59,9 +59,6 @@ const int ZERO_BTN  = 35;
 // ---- Settings ----
 #define DHT_TYPE DHT11                     // change to DHT22 if you swap in a DHT22 / AM2302
 const uint32_t READ_INTERVAL_MS = 2000;    // DHT11 allows 1 read/s, DHT22 1 read per 2 s: 2 s suits both
-// Every NEW upload sets the RTC to the compile time + this many seconds (compile + upload time).
-// To tune it: after an upload, compare the OLED with time.is and add the difference.
-const int      UPLOAD_DELAY_S   = 30;
 
 // ---- Hardware objects ----
 Adafruit_SSD1306 oled(128, 64, &Wire, -1);  // 128x64 OLED, no reset pin
@@ -168,8 +165,8 @@ void rtcWrite(const struct tm &t) {
   rtcSelect(false);
 }
 
-// The time this sketch was compiled (from the __DATE__ and __TIME__ macros) plus
-// UPLOAD_DELAY_S, used to set the RTC after each new upload. It is your PC's local time, so the RTC ends up in your local time too.
+// The time this sketch was compiled (from the __DATE__ and __TIME__ macros), used to
+// set the RTC after each new upload. It is your PC's local time, so the RTC ends up in your local time too.
 struct tm compileTime() {
   struct tm t = {};
   char mon[4];
@@ -178,8 +175,7 @@ struct tm compileTime() {
   // Month name -> 0-11 by its position in this string
   t.tm_mon = (strstr("JanFebMarAprMayJunJulAugSepOctNovDec", mon) - "JanFebMarAprMayJunJulAugSepOctNovDec") / 3;
   t.tm_year -= 1900;
-  t.tm_sec += UPLOAD_DELAY_S;
-  mktime(&t);  // carries the extra seconds into min/hour/day and fills in tm_wday
+  mktime(&t);  // fills in tm_wday
   return t;
 }
 

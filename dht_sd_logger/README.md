@@ -76,7 +76,7 @@ The sketch writes the time to the RTC and restarts, and logging continues in a n
 
 At each boot the sketch waits for the RTC's seconds to tick over before reading it, so the log starts on the exact second. After setting, expect a drift of about 1 to 2 s a day from the DS1302 crystal. Re-set it every week or two if you need it to stay within a second.
 
-**Automatic set on upload:** the first boot after every new upload sets the RTC to the compile time plus `UPLOAD_DELAY_S` (30 s by default, to cover compiling and uploading). Pressing RST or power-cycling does *not* reset the clock. Only a new upload does. That gets you within a few seconds. To tune it, compare the OLED with time.is after an upload and adjust `UPLOAD_DELAY_S` by the difference. For exact seconds, use the Serial Monitor method above.
+**Automatic set on upload:** the first boot after every new upload sets the RTC to the compile time, as it is (no correction added). Pressing RST or power-cycling does *not* reset the clock. Only a new upload does. The clock ends up behind by however long compiling and uploading took, usually 30 to 60 s. For exact seconds, use the Serial Monitor method above.
 
 A brand-new RTC, or one whose battery was removed, is also set to the compile time automatically.
 
