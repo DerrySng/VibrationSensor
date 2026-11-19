@@ -1,7 +1,7 @@
 # ADXL375 → SD card logger (ESP32-DevKitC)
 
 The sketch is `adxl375_sd_logger/adxl375_sd_logger.ino`. Use the Arduino IDE with the ESP32 board package and select the **ESP32 Dev Module** board.
-In Library Manager, install **Adafruit SSD1306**. It pulls in Adafruit GFX and BusIO automatically.
+In Library Manager, install **Adafruit SSD1306**. It pulls in Adafruit GFX and BusIO automatically. Also install **Ds1302** by Rafa Couto for the RTC.
 
 ## Wiring (Prechin ESP32 base board)
 
@@ -17,14 +17,14 @@ Pins are checked against the base board schematic. The TF slot is soldered to GP
 | | CS | GPIO26 | |
 | SD module | VCC | 3V3 (or 5V if the module has a regulator) | |
 | | GND | GND | |
-| | SCK | GPIO18 | VSPI, **shared with DS1302 SCLK** |
+| | SCK | GPIO18 | VSPI |
 | | MISO | GPIO19 | VSPI |
-| | MOSI | GPIO23 | VSPI, **shared with DS1302 I/O** |
+| | MOSI | GPIO23 | VSPI |
 | | CS | GPIO4 | Hardwired on the base board |
 | DS1302 RTC | VCC | 3V3 | Add a CR2032 coin cell (or the module's battery) so it keeps time |
 | | GND | GND | |
-| | CLK (SCLK) | GPIO18 | Shared with SD SCK |
-| | DAT (I/O) | GPIO23 | Shared with SD MOSI |
+| | CLK (SCLK) | GPIO16 | Own pin (not shared) |
+| | DAT (I/O) | GPIO17 | Own pin (not shared) |
 | | RST (CE) | GPIO25 | Its own pin, must not be shared |
 | SSD1306 OLED (I2C) | VCC / GND | 3V3 / GND | |
 | | SDA | GPIO21 | |
@@ -32,23 +32,16 @@ Pins are checked against the base board schematic. The TF slot is soldered to GP
 | Zero button | one leg | GPIO32 | e.g. base board KEY1. Uses the internal pull-up, no resistor needed |
 | | other leg | GND | KEY1 already goes to GND. For a button to 3V3 set `BTN_PRESSED = HIGH` (internal pull-down) |
 
-### How the RTC shares the SD pins
+### RTC pins
 
-The DS1302 isn't really an SPI device. It uses a 3-wire bus with a single bidirectional data line, and it sends data LSB first. Because of that it can't sit on the SPI bus at the same time as the SD card. The sketch makes the sharing safe like this:
-
-- The DS1302 gets its own CE pin. While CE is low, the DS1302 ignores the clock and doesn't drive its data line, so SD card traffic never reaches it.
-- The RTC is read only once, at boot, before the SD card is started. During that read SD_CS is held high, so the card ignores the RTC traffic.
-- Once the SD card is started it owns those pins. After that, the time comes from the ESP32's own timer, counted from the RTC time read at boot.
-- Don't connect the DS1302 data line to MISO. Many SD modules leave their MISO buffer driving the line all the time, which would clash with the RTC.
-
-If you'd rather keep the buses separate, connect the DS1302 to any 3 free GPIOs and change the pin constants. The code works either way.
+The DS1302 has its own three pins: CLK 16, DAT 17, RST/CE 25. GPIO16 and 17 also go to the base board's servo headers and LCD/OLED socket, so leave those empty. (Earlier versions shared the SD card's 18/23. That's no longer needed.)
 
 ## Setting the RTC
 
-The DS1302's DAT (I/O) wire must go to **GPIO23**, not GPIO19 as in the kit's own example.
+Wire the DS1302 to **CLK 16, DAT 17, RST 25**. The kit's own example uses different pins. Fit a CR2032 backup cell, or it loses the time at every power-off.
 
-- **Automatic from WiFi/NTP (recommended):** fill in `WIFI_SSID` and `WIFI_PASS` near the top of the sketch. At every boot it joins WiFi (up to 10 s), gets the time from NTP (up to 8 s), and writes it to the RTC at the start of a second, in Singapore time (`TZ_OFFSET_S = 8 * 3600`). Then it turns WiFi **off** before logging starts, so the radio can't disturb 1600 Hz sampling. With no WiFi in range, or the SSID left empty, it skips this and uses the RTC as below, so the logger still works in the field. Don't push your real WiFi password to GitHub.
-- **Automatic on upload (when NTP didn't run):** the first boot after every new upload sets the RTC to the compile time, with nothing added, so it ends up behind by however long compiling and uploading took. Pressing RST or power-cycling does *not* change the clock. Only a new upload does. A brand-new RTC, or one whose battery was removed, is also set to the compile time.
+- **Automatic on upload:** the first boot after every new upload sets the RTC to the compile time, with nothing added, so it ends up behind by however long compiling and uploading took. Pressing RST or power-cycling does *not* change the clock. Only a new upload does. A brand-new RTC, or one whose battery was removed, is also set to the compile time.
+- **One click from the PC:** double-click `rtc_sync/Sync RTC.bat`, pick the COM port and press Sync RTC. It does the step below for you, on the exact second.
 - **Exact to the second:** open Serial Monitor at 115200 with the line ending set to **Newline**. Type a time a few seconds ahead of a reference clock (e.g. time.is) as `YYYY-MM-DD HH:MM:SS`, and press Enter exactly when the reference clock reaches that second. The sketch sets the RTC and restarts, and logging continues in a new file. A wrong format prints `Time not understood` and changes nothing.
 - At each boot the sketch waits for the RTC's seconds to tick over before reading it, so the time starts on the exact second. Expect a drift of about 1 to 2 s a day after setting.
 
@@ -88,8 +81,6 @@ date,time,us,x_g,y_g,z_g
 
 ```
 ADXL375 SD logger
-WiFi: connecting to MyWiFi...
-NTP: RTC set to 2026-11-19 09:29:58
 RTC: 2026-11-19 09:30:00
 ADXL375 DEVID: 0xE5
 Logging to /20261119_093000.csv
@@ -101,7 +92,7 @@ Zero OFF (raw values).
 
 Errors you might see:
 - `ADXL375 DEVID: 0x00/0xFF` means the sensor isn't answering. Check its wiring and the 3.3 V supply.
-- `RTC not found` means a CE, CLK or DAT wire is wrong (DAT goes to GPIO23). Logging continues, with timestamps counted from 1970-01-01.
+- `RTC not found` means a CE, CLK or DAT wire is wrong (CLK 16, DAT 17, RST 25). Logging continues, with timestamps counted from 1970-01-01.
 - `SD card mount failed` means the card isn't formatted FAT32, isn't inserted, or the wiring is wrong.
 
 ## Known limits

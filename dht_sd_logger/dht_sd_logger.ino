@@ -16,6 +16,7 @@
 // Libraries (Library Manager):
 //   - "Adafruit SSD1306" (pulls in Adafruit GFX + BusIO)
 //   - "DHT sensor library" by Adafruit (pulls in Adafruit Unified Sensor)
+//   - "Ds1302" by Rafa Couto (RTC)
 //
 // Each boot creates a new file named from the RTC, e.g. /20261119_093000.csv
 // (falls back to /log_000.csv ... if the RTC is missing).
@@ -32,6 +33,7 @@
 #include <Adafruit_GFX.h>      // text drawing for the OLED
 #include <Adafruit_SSD1306.h>  // OLED driver
 #include <DHT.h>               // DHT11 / DHT22 driver
+#include <Ds1302.h>          // "Ds1302" by Rafa Couto (Library Manager)
 #include <Preferences.h>       // small store in flash: remembers which build last set the RTC
 #include <time.h>              // struct tm, mktime, gmtime_r
 #include "esp_timer.h"         // 64-bit microsecond timer (does not wrap like micros())
@@ -42,8 +44,11 @@ const int SD_SCK    = 18;
 const int SD_MISO   = 19;
 const int SD_MOSI   = 23;
 const int SD_CS     = 4;    // base board TF slot is hardwired to GPIO4
-// DS1302 RTC: SCLK -> SD_SCK, I/O -> SD_MOSI, CE (RST) on its own pin
-const int RTC_CE    = 25;
+// DS1302 RTC on its own 3 pins (no longer shared with the SD card).
+// 16/17 only go to the base board's servo headers and LCD socket: leave those empty.
+const int RTC_CLK   = 16;   // DS1302 CLK (SCLK)
+const int RTC_IO    = 17;   // DS1302 DAT (I/O)
+const int RTC_CE    = 25;   // DS1302 RST (CE)
 // SSD1306 OLED (I2C): wire with jumper leads, NOT the board's OLED socket (that uses SD's 18/23)
 const int OLED_SDA  = 21;
 const int OLED_SCL  = 22;
@@ -79,74 +84,31 @@ float lastRawH = NAN;            // latest humidity straight from the sensor (be
 float lastT = NAN, lastH = NAN;  // latest temperature and zeroed humidity, shown on the OLED
 bool zeroed = false;             // toggled by each button press; false = raw humidity
 
-// ================= DS1302 (3-wire, LSB first) =================
-// Only used in setup(), BEFORE the SD card takes over SCK/MOSI. With CE low the DS1302
-// ignores the bus, and with SD_CS high the card ignores the RTC traffic.
-// The pins are bit-banged by hand because the DS1302 is not real SPI (one shared data line, LSB first).
-
-// Send one byte, lowest bit first. If thenRead is true, the RTC will answer right after,
-// so the data pin is switched to input before the last clock falls.
-void rtcWriteByte(uint8_t b, bool thenRead = false) {
-  pinMode(SD_MOSI, OUTPUT);
-  for (int i = 0; i < 8; i++) {
-    digitalWrite(SD_MOSI, b & 1);
-    b >>= 1;
-    delayMicroseconds(1);
-    digitalWrite(SD_SCK, HIGH);   // RTC latches the bit on the rising edge
-    delayMicroseconds(1);
-    if (thenRead && i == 7) pinMode(SD_MOSI, INPUT);  // release I/O before the RTC drives it
-    digitalWrite(SD_SCK, LOW);
-  }
-}
-
-// Receive one byte, lowest bit first. The RTC puts each bit out on the falling clock edge.
-uint8_t rtcReadByte() {
-  uint8_t b = 0;
-  for (int i = 0; i < 8; i++) {
-    delayMicroseconds(1);
-    b |= digitalRead(SD_MOSI) << i;
-    digitalWrite(SD_SCK, HIGH);
-    delayMicroseconds(1);
-    digitalWrite(SD_SCK, LOW);
-  }
-  return b;
-}
-
-// Start (on = true) or end (on = false) a transfer. Clock must be low when CE changes.
-void rtcSelect(bool on) {
-  digitalWrite(SD_SCK, LOW);
-  digitalWrite(RTC_CE, on);
-  delayMicroseconds(4);
-}
-
-// The DS1302 stores numbers as BCD: 0x59 means 59.
-uint8_t bcd2dec(uint8_t v) { return (v >> 4) * 10 + (v & 0x0F); }
-uint8_t dec2bcd(uint8_t v) { return ((v / 10) << 4) | (v % 10); }
+// ================= DS1302 (Ds1302 library by Rafa Couto) =================
+Ds1302 rtc(RTC_CE, RTC_CLK, RTC_IO);
 
 // Wait (up to 1.1 s) for the RTC's seconds to tick over, so the next read lands right at the
 // start of a second. Without this the boot time could be up to 1 s off.
 void rtcWaitForTick() {
-  auto sec = []() { rtcSelect(true); rtcWriteByte(0x81, true); uint8_t v = rtcReadByte(); rtcSelect(false); return v; };
-  uint8_t s0 = sec();
+  Ds1302::DateTime d;
+  rtc.getDateTime(&d);
+  uint8_t s0 = d.second;
   uint32_t start = millis();
-  while (sec() == s0 && millis() - start < 1100) {}
+  do { rtc.getDateTime(&d); } while (d.second == s0 && millis() - start < 1100);
 }
 
 // Read date and time into t. Returns false if the clock is stopped or not connected.
 bool rtcRead(struct tm &t) {
-  uint8_t r[7];                             // sec, min, hour, date, month, weekday, year
-  rtcSelect(true);
-  rtcWriteByte(0xBF, true);                 // clock burst read
-  for (int i = 0; i < 7; i++) r[i] = rtcReadByte();
-  rtcSelect(false);
-  if (r[0] & 0x80) return false;            // clock halted (new / battery lost)
+  if (rtc.isHalted()) return false;          // clock halted (new / battery lost)
+  Ds1302::DateTime d;
+  rtc.getDateTime(&d);
   t = {};
-  t.tm_sec  = bcd2dec(r[0] & 0x7F);
-  t.tm_min  = bcd2dec(r[1] & 0x7F);
-  t.tm_hour = bcd2dec(r[2] & 0x3F);          // 24 h mode (we always write 24 h)
-  t.tm_mday = bcd2dec(r[3] & 0x3F);
-  t.tm_mon  = bcd2dec(r[4] & 0x1F) - 1;      // struct tm months are 0-11
-  t.tm_year = bcd2dec(r[6]) + 100;           // 2000-2099
+  t.tm_sec  = d.second;
+  t.tm_min  = d.minute;
+  t.tm_hour = d.hour;                        // 24 h mode (we always write 24 h)
+  t.tm_mday = d.day;
+  t.tm_mon  = d.month - 1;                   // struct tm months are 0-11
+  t.tm_year = d.year + 100;                  // 2000-2099
   // All-0xFF / garbage (RTC not connected) fails these checks
   return t.tm_sec < 60 && t.tm_min < 60 && t.tm_hour < 24 &&
          t.tm_mday >= 1 && t.tm_mday <= 31 && t.tm_mon >= 0 && t.tm_mon < 12;
@@ -154,18 +116,9 @@ bool rtcRead(struct tm &t) {
 
 // Set the RTC to t and start it running.
 void rtcWrite(const struct tm &t) {
-  rtcSelect(true); rtcWriteByte(0x8E); rtcWriteByte(0x00); rtcSelect(false);  // write-protect off
-  rtcSelect(true);
-  rtcWriteByte(0xBE);                       // clock burst write (all 8 bytes)
-  rtcWriteByte(dec2bcd(t.tm_sec));          // bit7 = 0 -> clock runs
-  rtcWriteByte(dec2bcd(t.tm_min));
-  rtcWriteByte(dec2bcd(t.tm_hour));
-  rtcWriteByte(dec2bcd(t.tm_mday));
-  rtcWriteByte(dec2bcd(t.tm_mon + 1));
-  rtcWriteByte(dec2bcd(t.tm_wday + 1));
-  rtcWriteByte(dec2bcd(t.tm_year - 100));
-  rtcWriteByte(0x00);                       // control: write-protect stays off
-  rtcSelect(false);
+  Ds1302::DateTime d = { (uint8_t)(t.tm_year - 100), (uint8_t)(t.tm_mon + 1), (uint8_t)t.tm_mday,
+                         (uint8_t)t.tm_hour, (uint8_t)t.tm_min, (uint8_t)t.tm_sec, (uint8_t)(t.tm_wday + 1) };
+  rtc.setDateTime(&d);
 }
 
 // The time this sketch was compiled (from the __DATE__ and __TIME__ macros), used to
@@ -220,7 +173,7 @@ void halt(const char *msg) {
 }
 
 // ================= setup(): runs once at power-on =================
-// Order matters: OLED first (to show errors), RTC before the SD card (they share pins).
+// OLED first, so errors can be shown on it.
 void setup() {
   Serial.begin(115200);
   delay(500);
@@ -235,10 +188,9 @@ void setup() {
   if (oledOk) { oled.setTextColor(SSD1306_WHITE); oled.clearDisplay(); oled.display(); }
   else Serial.println("WARNING: OLED not found, continuing without display.");
 
-  // RTC: talk to it on the SD lines BEFORE SPI/SD take them over
+  // RTC pins: CE low = RTC ignores the bus
   pinMode(SD_CS, OUTPUT);  digitalWrite(SD_CS, HIGH);   // keep the SD card deselected
-  pinMode(RTC_CE, OUTPUT); digitalWrite(RTC_CE, LOW);
-  pinMode(SD_SCK, OUTPUT); digitalWrite(SD_SCK, LOW);
+  rtc.init();
   struct tm now;
   rtcWaitForTick();
   bool rtcOk = rtcRead(now);
@@ -267,7 +219,7 @@ void setup() {
     Serial.println("WARNING: RTC not found, timestamps are seconds since boot.");
   }
 
-  // SD card on VSPI (takes over SD_SCK / SD_MOSI from here on)
+  // SD card on VSPI
   SPI.begin(SD_SCK, SD_MISO, SD_MOSI, -1);
   if (!SD.begin(SD_CS, SPI)) halt("ERROR: SD card mount failed. Check card (FAT32) and wiring.");
 
@@ -291,8 +243,7 @@ void setup() {
 }
 
 // Set the RTC from a line typed in Serial Monitor: "YYYY-MM-DD HH:MM:SS".
-// The RTC shares pins with the SD card, so: close the file, release the SPI bus,
-// write the RTC, then restart. The new boot reads the fresh time and starts a new file.
+// Write the RTC, then restart: the new boot reads the fresh time and starts a new file.
 void checkSerialTimeSet() {
   static char line[24];
   static uint8_t len;
@@ -312,11 +263,7 @@ void checkSerialTimeSet() {
     }
     t.tm_year -= 1900; t.tm_mon -= 1;
     mktime(&t);                           // fills in tm_wday
-    logFile.close();                      // nothing is lost: every line is already flushed
-    SD.end();
-    SPI.end();                            // give SCK/MOSI back so they can be bit-banged
-    pinMode(SD_CS, OUTPUT);  digitalWrite(SD_CS, HIGH);
-    pinMode(SD_SCK, OUTPUT); digitalWrite(SD_SCK, LOW);
+    logFile.close();                      // close the file cleanly before the restart
     rtcWrite(t);
     Serial.printf("RTC set to %s. Restarting...\n", line);
     delay(100);

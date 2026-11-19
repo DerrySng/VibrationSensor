@@ -1,6 +1,6 @@
 // =====================================================================================
 // ADXL375 -> SD card CSV logger for ESP32-DevKitC (Arduino framework)
-// + DS1302 RTC (shares the SD card's SCK/MOSI lines), SSD1306 OLED, zero button.
+// + DS1302 RTC (on its own pins), SSD1306 OLED, zero button.
 //
 // What it does:
 //   1. On boot, reads the date/time from the DS1302 real-time clock.
@@ -11,14 +11,11 @@
 //      100 ms of Z readings and uses them as the new zero for Z ONLY (X and Y are always raw),
 //      so Z reads ~0 g instead of ~1 g of gravity. Next press goes back
 //      to raw values, and so on. The zero is NOT remembered: every reset starts raw.
-//   6. At boot, if WIFI_SSID is filled in, joins WiFi for up to ~15 s, gets the time from NTP
-//      and writes it to the RTC on the exact second, then turns WiFi OFF before logging starts.
-//      No WiFi (or SSID left empty): it carries on with the RTC as below.
-//   7. Every NEW upload sets the RTC to the compile time (only if NTP failed). For an exact second, type the time
+//   6. Every NEW upload sets the RTC to the compile time. For an exact second, type the time
 //      in Serial Monitor (115200, line ending "Newline") as  YYYY-MM-DD HH:MM:SS  and press
 //      Enter on that second; the RTC is set and the ESP32 restarts with a new log file.
 //
-// Libraries (Library Manager): "Adafruit SSD1306" (pulls in Adafruit GFX + BusIO).
+// Libraries (Library Manager): "Adafruit SSD1306" (pulls in Adafruit GFX + BusIO) and "Ds1302" by Rafa Couto.
 // Everything else ships with the ESP32 board package.
 //
 // Each boot creates a new file named from the RTC, e.g. /20261118_093000.csv
@@ -31,11 +28,10 @@
 #include <Wire.h>              // I2C bus (OLED)
 #include <Adafruit_GFX.h>      // text drawing for the OLED
 #include <Adafruit_SSD1306.h>  // OLED driver
+#include <Ds1302.h>          // "Ds1302" by Rafa Couto (Library Manager)
 #include <Preferences.h>       // small store in flash: remembers which build last set the RTC
 #include <time.h>              // struct tm, mktime, gmtime_r
 #include "esp_timer.h"         // 64-bit microsecond timer (does not wrap like micros())
-#include <WiFi.h>              // only used at boot, to get the time from NTP
-#include <sys/time.h>          // gettimeofday: NTP time with microseconds
 
 // ---- Pins: for the Prechin ESP32 base board (checked against its schematic). ----
 // Avoid strapping pins (0, 2, 5, 12, 15) and input-only pins (34-39) for outputs.
@@ -49,8 +45,11 @@ const int SD_SCK    = 18;
 const int SD_MISO   = 19;
 const int SD_MOSI   = 23;
 const int SD_CS     = 4;    // base board TF slot is hardwired to GPIO4
-// DS1302 RTC: SCLK -> SD_SCK, I/O -> SD_MOSI, CE (RST) on its own pin
-const int RTC_CE    = 25;
+// DS1302 RTC on its own 3 pins (no longer shared with the SD card).
+// 16/17 only go to the base board's servo headers and LCD socket: leave those empty.
+const int RTC_CLK   = 16;   // DS1302 CLK (SCLK)
+const int RTC_IO    = 17;   // DS1302 DAT (I/O)
+const int RTC_CE    = 25;   // DS1302 RST (CE)
 // SSD1306 OLED (I2C): wire with jumper leads, NOT the board's OLED socket (that uses SD's 18/23)
 const int OLED_SDA  = 21;
 const int OLED_SCL  = 22;
@@ -69,13 +68,6 @@ const uint32_t FLUSH_INTERVAL_MS  = 1000;  // max data lost on power cut
 const uint32_t PRINT_INTERVAL_MS  = 500;   // Serial preview rate
 const float    G_PER_LSB          = 0.049; // ADXL375 datasheet: 49 mg/LSB
 const int      ZERO_SAMPLES       = 160;   // 100 ms average when the zero button is pressed
-
-// ---- WiFi / NTP time sync at boot ----
-// Fill in your WiFi to set the RTC from the internet at every boot. Leave "" to skip.
-// Do NOT push your real password to GitHub.
-const char    *WIFI_SSID          = "";
-const char    *WIFI_PASS          = "";
-const long     TZ_OFFSET_S        = 8 * 3600; // Singapore is UTC+8; the RTC and log use local time
 
 // ---- ADXL375 registers (addresses from the datasheet) ----
 const uint8_t REG_DEVID       = 0x00;  // reads 0xE5
@@ -128,74 +120,31 @@ void adxlRead(uint8_t reg, uint8_t *buf, uint8_t len) {
   adxlSPI.endTransaction();
 }
 
-// ================= DS1302 (3-wire, LSB first) =================
-// Only used in setup(), BEFORE the SD card takes over SCK/MOSI. With CE low the DS1302
-// ignores the bus, and with SD_CS high the card ignores the RTC traffic.
-// The pins are bit-banged by hand because the DS1302 is not real SPI (one shared data line, LSB first).
-
-// Send one byte, lowest bit first. If thenRead is true, the RTC will answer right after,
-// so the data pin is switched to input before the last clock falls.
-void rtcWriteByte(uint8_t b, bool thenRead = false) {
-  pinMode(SD_MOSI, OUTPUT);
-  for (int i = 0; i < 8; i++) {
-    digitalWrite(SD_MOSI, b & 1);
-    b >>= 1;
-    delayMicroseconds(1);
-    digitalWrite(SD_SCK, HIGH);   // RTC latches the bit on the rising edge
-    delayMicroseconds(1);
-    if (thenRead && i == 7) pinMode(SD_MOSI, INPUT);  // release I/O before the RTC drives it
-    digitalWrite(SD_SCK, LOW);
-  }
-}
-
-// Receive one byte, lowest bit first. The RTC puts each bit out on the falling clock edge.
-uint8_t rtcReadByte() {
-  uint8_t b = 0;
-  for (int i = 0; i < 8; i++) {
-    delayMicroseconds(1);
-    b |= digitalRead(SD_MOSI) << i;
-    digitalWrite(SD_SCK, HIGH);
-    delayMicroseconds(1);
-    digitalWrite(SD_SCK, LOW);
-  }
-  return b;
-}
-
-// Start (on = true) or end (on = false) a transfer. Clock must be low when CE changes.
-void rtcSelect(bool on) {
-  digitalWrite(SD_SCK, LOW);
-  digitalWrite(RTC_CE, on);
-  delayMicroseconds(4);
-}
-
-// The DS1302 stores numbers as BCD: 0x59 means 59.
-uint8_t bcd2dec(uint8_t v) { return (v >> 4) * 10 + (v & 0x0F); }
-uint8_t dec2bcd(uint8_t v) { return ((v / 10) << 4) | (v % 10); }
+// ================= DS1302 (Ds1302 library by Rafa Couto) =================
+Ds1302 rtc(RTC_CE, RTC_CLK, RTC_IO);
 
 // Wait (up to 1.1 s) for the RTC's seconds to tick over, so the next read lands right at the
 // start of a second. Without this the boot time could be up to 1 s off.
 void rtcWaitForTick() {
-  auto sec = []() { rtcSelect(true); rtcWriteByte(0x81, true); uint8_t v = rtcReadByte(); rtcSelect(false); return v; };
-  uint8_t s0 = sec();
+  Ds1302::DateTime d;
+  rtc.getDateTime(&d);
+  uint8_t s0 = d.second;
   uint32_t start = millis();
-  while (sec() == s0 && millis() - start < 1100) {}
+  do { rtc.getDateTime(&d); } while (d.second == s0 && millis() - start < 1100);
 }
 
 // Read date and time into t. Returns false if the clock is stopped or not connected.
 bool rtcRead(struct tm &t) {
-  uint8_t r[7];                             // sec, min, hour, date, month, weekday, year
-  rtcSelect(true);
-  rtcWriteByte(0xBF, true);                 // clock burst read
-  for (int i = 0; i < 7; i++) r[i] = rtcReadByte();
-  rtcSelect(false);
-  if (r[0] & 0x80) return false;            // clock halted (new / battery lost)
+  if (rtc.isHalted()) return false;          // clock halted (new / battery lost)
+  Ds1302::DateTime d;
+  rtc.getDateTime(&d);
   t = {};
-  t.tm_sec  = bcd2dec(r[0] & 0x7F);
-  t.tm_min  = bcd2dec(r[1] & 0x7F);
-  t.tm_hour = bcd2dec(r[2] & 0x3F);          // 24 h mode (we always write 24 h)
-  t.tm_mday = bcd2dec(r[3] & 0x3F);
-  t.tm_mon  = bcd2dec(r[4] & 0x1F) - 1;      // struct tm months are 0-11
-  t.tm_year = bcd2dec(r[6]) + 100;           // 2000-2099
+  t.tm_sec  = d.second;
+  t.tm_min  = d.minute;
+  t.tm_hour = d.hour;                        // 24 h mode (we always write 24 h)
+  t.tm_mday = d.day;
+  t.tm_mon  = d.month - 1;                   // struct tm months are 0-11
+  t.tm_year = d.year + 100;                  // 2000-2099
   // All-0xFF / garbage (RTC not connected) fails these checks
   return t.tm_sec < 60 && t.tm_min < 60 && t.tm_hour < 24 &&
          t.tm_mday >= 1 && t.tm_mday <= 31 && t.tm_mon >= 0 && t.tm_mon < 12;
@@ -203,63 +152,9 @@ bool rtcRead(struct tm &t) {
 
 // Set the RTC to t and start it running.
 void rtcWrite(const struct tm &t) {
-  rtcSelect(true); rtcWriteByte(0x8E); rtcWriteByte(0x00); rtcSelect(false);  // write-protect off
-  rtcSelect(true);
-  rtcWriteByte(0xBE);                       // clock burst write (all 8 bytes)
-  rtcWriteByte(dec2bcd(t.tm_sec));          // bit7 = 0 -> clock runs
-  rtcWriteByte(dec2bcd(t.tm_min));
-  rtcWriteByte(dec2bcd(t.tm_hour));
-  rtcWriteByte(dec2bcd(t.tm_mday));
-  rtcWriteByte(dec2bcd(t.tm_mon + 1));
-  rtcWriteByte(dec2bcd(t.tm_wday + 1));
-  rtcWriteByte(dec2bcd(t.tm_year - 100));
-  rtcWriteByte(0x00);                       // control: write-protect stays off
-  rtcSelect(false);
-}
-
-// Show a short status line on the OLED (only used during boot).
-void oledMsg(const char *msg) {
-  if (!oledOk) return;
-  oled.clearDisplay(); oled.setTextSize(1); oled.setCursor(0, 0);
-  oled.println(msg); oled.display();
-}
-
-// Join WiFi, get the time from NTP and write it to the RTC exactly at the start of a second.
-// WiFi is switched off afterwards so it can't disturb 1600 Hz sampling (or drain power).
-// Returns false (and leaves the RTC alone) if the SSID is empty, WiFi or NTP fails.
-bool ntpSync() {
-  if (WIFI_SSID[0] == 0) return false;
-  Serial.printf("WiFi: connecting to %s...\n", WIFI_SSID);
-  oledMsg("WiFi: syncing time...");
-  WiFi.mode(WIFI_STA);
-  WiFi.begin(WIFI_SSID, WIFI_PASS);
-  uint32_t start = millis();
-  while (WiFi.status() != WL_CONNECTED && millis() - start < 10000) delay(200);
-  bool ok = false;
-  if (WiFi.status() == WL_CONNECTED) {
-    configTime(0, 0, "pool.ntp.org", "time.google.com");   // UTC; TZ_OFFSET_S is added below
-    start = millis();
-    while (time(nullptr) < 1700000000 && millis() - start < 8000) delay(100);  // wait for the answer
-    if (time(nullptr) >= 1700000000) {
-      struct timeval tv;
-      gettimeofday(&tv, nullptr);
-      time_t next = tv.tv_sec + 1 + TZ_OFFSET_S;            // the next whole second, local time
-      delayMicroseconds(1000000 - tv.tv_usec);              // wait until it starts...
-      struct tm t;
-      gmtime_r(&next, &t);
-      rtcWrite(t);                                          // ...and set the RTC right on it
-      Serial.printf("NTP: RTC set to %04d-%02d-%02d %02d:%02d:%02d\n", t.tm_year + 1900, t.tm_mon + 1,
-                    t.tm_mday, t.tm_hour, t.tm_min, t.tm_sec);
-      ok = true;
-    } else {
-      Serial.println("NTP: no answer, keeping the RTC time.");
-    }
-  } else {
-    Serial.println("WiFi: not connected, keeping the RTC time.");
-  }
-  WiFi.disconnect(true);
-  WiFi.mode(WIFI_OFF);
-  return ok;
+  Ds1302::DateTime d = { (uint8_t)(t.tm_year - 100), (uint8_t)(t.tm_mon + 1), (uint8_t)t.tm_mday,
+                         (uint8_t)t.tm_hour, (uint8_t)t.tm_min, (uint8_t)t.tm_sec, (uint8_t)(t.tm_wday + 1) };
+  rtc.setDateTime(&d);
 }
 
 // The time this sketch was compiled (from the __DATE__ and __TIME__ macros), used to
@@ -313,7 +208,7 @@ void halt(const char *msg) {
 }
 
 // ================= setup(): runs once at power-on =================
-// Order matters: OLED first (to show errors), RTC before the SD card (they share pins).
+// OLED first, so errors can be shown on it.
 void setup() {
   Serial.begin(115200);
   delay(500);
@@ -327,11 +222,9 @@ void setup() {
   if (oledOk) { oled.setTextColor(SSD1306_WHITE); oled.clearDisplay(); oled.display(); }
   else Serial.println("WARNING: OLED not found, continuing without display.");
 
-  // RTC: talk to it on the SD lines BEFORE SPI/SD take them over
+  // RTC pins: CE low = RTC ignores the bus
   pinMode(SD_CS, OUTPUT);  digitalWrite(SD_CS, HIGH);   // keep the SD card deselected
-  pinMode(RTC_CE, OUTPUT); digitalWrite(RTC_CE, LOW);
-  pinMode(SD_SCK, OUTPUT); digitalWrite(SD_SCK, LOW);
-  bool ntpOk = ntpSync();   // WiFi -> NTP -> RTC; WiFi is off again afterwards
+  rtc.init();
   struct tm now;
   rtcWaitForTick();
   bool rtcOk = rtcRead(now);
@@ -342,10 +235,8 @@ void setup() {
   prefs.begin("rtc", false);
   prefs.getString("build", lastBuild, sizeof(lastBuild));
   bool newBuild = strcmp(lastBuild, thisBuild) != 0;
-  if (ntpOk) {
-    prefs.putString("build", thisBuild);   // NTP already set it; don't overwrite with compile time
-  } else if (!rtcOk || newBuild) {
-    // No NTP, and a new upload / new RTC / flat battery: set it to the compile time, then read it back
+  if (!rtcOk || newBuild) {
+    // New upload / new RTC / flat battery: set it to the compile time, then read it back
     Serial.println(newBuild ? "RTC: new upload, setting to compile time" : "RTC: not running, setting to compile time");
     rtcWrite(compileTime());
     prefs.putString("build", thisBuild);
@@ -379,7 +270,7 @@ void setup() {
   adxlWrite(REG_POWER_CTL, 0x08);   // measurement mode
 
 
-  // SD card on VSPI (takes over SD_SCK / SD_MOSI from here on)
+  // SD card on VSPI
   SPI.begin(SD_SCK, SD_MISO, SD_MOSI, -1);
   if (!SD.begin(SD_CS, SPI)) halt("ERROR: SD card mount failed. Check card (FAT32) and wiring.");
 
@@ -407,8 +298,7 @@ void setup() {
 }
 
 // Set the RTC from a line typed in Serial Monitor: "YYYY-MM-DD HH:MM:SS".
-// The RTC shares pins with the SD card, so: close the file, release the SPI bus,
-// write the RTC, then restart. The new boot reads the fresh time and starts a new file.
+// Write the RTC, then restart: the new boot reads the fresh time and starts a new file.
 void checkSerialTimeSet() {
   static char line[24];
   static uint8_t len;
@@ -428,11 +318,7 @@ void checkSerialTimeSet() {
     }
     t.tm_year -= 1900; t.tm_mon -= 1;
     mktime(&t);                           // fills in tm_wday
-    logFile.close();                      // nothing is lost: every line is already flushed
-    SD.end();
-    SPI.end();                            // give SCK/MOSI back so they can be bit-banged
-    pinMode(SD_CS, OUTPUT);  digitalWrite(SD_CS, HIGH);
-    pinMode(SD_SCK, OUTPUT); digitalWrite(SD_SCK, LOW);
+    logFile.close();                      // close the file cleanly before the restart
     rtcWrite(t);
     Serial.printf("RTC set to %s. Restarting...\n", line);
     delay(100);
