@@ -9,8 +9,8 @@
 //   2. Creates a new CSV file on the SD card.
 //   3. Every 2 seconds reads temperature + humidity and writes one CSV line.
 //   4. Shows the time, temperature and humidity on the OLED.
-//   5. The zero button (GPIO35) zeroes the HUMIDITY only: the humidity at the moment of
-//      the press becomes the new 0 %. Temperature is never changed. The zero is NOT
+//   5. The zero button (GPIO32, e.g. KEY1) TOGGLES a humidity-only zero: first press makes the humidity
+//      at that moment the new 0 %, next press goes back to raw, and so on. Temperature is never changed. The zero is NOT
 //      remembered: every reset (RST button or power-up) starts again from raw humidity.
 //
 // Libraries (Library Manager):
@@ -51,11 +51,12 @@ const uint8_t OLED_ADDR = 0x3C;  // some modules use 0x3D
 // DHT data line. 27 is what the kit's own DHT11 example uses (free now the ADXL375 is gone).
 // The base board's DHT11 socket (J4) already has a 10k pull-up; jumper its signal pin to GPIO27.
 const int DHT_PIN   = 27;
-// Zero button (humidity only) on GPIO35, ACTIVE HIGH: pressed = HIGH.
-// Wire the button between GPIO35 and 3V3. GPIO35 is input-only with NO internal pull-down,
-// so add a 10k resistor from GPIO35 to GND to hold it LOW when the button is released.
-const int ZERO_BTN  = 35;
-const int BTN_PRESSED = HIGH;  // change to LOW for a button to GND with a pull-up
+// Zero button (humidity only) on GPIO32. GPIO32 has internal pull-up AND pull-down resistors,
+// so no external resistor is needed. The sketch picks the right one from BTN_PRESSED:
+//   LOW  (default): button between GPIO32 and GND, e.g. base board KEY1. Internal pull-up.
+//   HIGH          : button between GPIO32 and 3V3. Internal pull-down.
+const int ZERO_BTN  = 32;
+const int BTN_PRESSED = LOW;
 // ---- end of pins ----
 
 // ---- Settings ----
@@ -76,7 +77,7 @@ bool oledOk;                     // false if no OLED answered at boot
 float humOff = 0;                // humidity zero offset in % RH, back to 0 on every reset
 float lastRawH = NAN;            // latest humidity straight from the sensor (before the offset)
 float lastT = NAN, lastH = NAN;  // latest temperature and zeroed humidity, shown on the OLED
-uint32_t zeroedMs;               // when the button was last pressed, to show "ZEROED" for 3 s
+bool zeroed = false;             // toggled by each button press; false = raw humidity
 
 // ================= DS1302 (3-wire, LSB first) =================
 // Only used in setup(), BEFORE the SD card takes over SCK/MOSI. With CE low the DS1302
@@ -189,7 +190,7 @@ time_t nowEpoch() { return (time_t)(bootEpoch + (esp_timer_get_time() - bootTime
 //   line 2 (big): clock
 //   line 3 (big): temperature
 //   line 4 (big): humidity
-//   top right: "ZEROED" for 3 s after the zero button is pressed
+//   top right: "ZEROED" while the humidity zero is on
 void drawOled(float tC, float hum) {
   if (!oledOk) return;
   time_t tt = nowEpoch();
@@ -199,7 +200,7 @@ void drawOled(float tC, float hum) {
   oled.setTextSize(1);
   oled.setCursor(0, 0);
   oled.printf("%04d-%02d-%02d   %s", t.tm_year + 1900, t.tm_mon + 1, t.tm_mday,
-              (zeroedMs && millis() - zeroedMs < 3000) ? "ZEROED" : "");
+              zeroed ? "ZEROED" : "");
   oled.setTextSize(2);
   oled.setCursor(0, 12);
   oled.printf("%02d:%02d:%02d\n", t.tm_hour, t.tm_min, t.tm_sec);
@@ -225,7 +226,7 @@ void setup() {
   delay(500);
   Serial.println("\nDHT SD logger (dummy tester)");
 
-  pinMode(ZERO_BTN, INPUT);  // plain INPUT: GPIO35 has no internal pull resistors, the external 10k does the job
+  pinMode(ZERO_BTN, BTN_PRESSED == LOW ? INPUT_PULLUP : INPUT_PULLDOWN);  // holds the pin at "not pressed"
   dht.begin();
 
   // OLED first, so later errors can be shown on it. Logging still works without it.
@@ -328,19 +329,25 @@ void loop() {
   uint32_t ms = millis();
   checkSerialTimeSet();
 
-  // Button: BTN_PRESSED (HIGH) = pressed, the external pull-down holds it LOW otherwise. 50 ms debounce.
+  // Button: reads BTN_PRESSED while pressed; the internal pull resistor holds it at the other level. 50 ms debounce.
   static int lastBtn = !BTN_PRESSED;
   static uint32_t lastBtnMs;
   int btn = digitalRead(ZERO_BTN);
   if (btn != lastBtn && ms - lastBtnMs > 50) {
     lastBtn = btn;
     lastBtnMs = ms;
-    // Pressed: the latest raw humidity becomes the new zero. Temperature is left alone.
-    if (btn == BTN_PRESSED && !isnan(lastRawH)) {
+    // Each press toggles: raw -> zeroed (latest raw humidity becomes 0 %) -> raw again.
+    // Temperature is left alone.
+    if (btn == BTN_PRESSED && zeroed) {
+      zeroed = false;
+      humOff = 0;
+      lastH = lastRawH;                         // show raw humidity straight away
+      Serial.println("Humidity zero OFF (raw).");
+    } else if (btn == BTN_PRESSED && !isnan(lastRawH)) {
+      zeroed = true;
       humOff = lastRawH;
       lastH = 0;                                // show 0 % straight away
-      zeroedMs = ms;
-      Serial.printf("Humidity zeroed. Offset: %.1f %%\n", humOff);
+      Serial.printf("Humidity zero ON. Offset: %.1f %%\n", humOff);
     } else if (btn == BTN_PRESSED) {
       Serial.println("Zero ignored: no valid humidity reading yet.");
     }

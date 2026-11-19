@@ -17,33 +17,22 @@ Using a DHT22 instead? Change `#define DHT_TYPE DHT11` to `DHT22`.
 | SD card | SCK / MISO / MOSI / CS | 18 / 19 / 23 / 4 | Base board TF slot, hardwired |
 | DS1302 RTC | CLK / DAT / RST(CE) | 18 / 23 / 25 | Shares SD SCK/MOSI, read once at boot (same as the ADXL375 logger) |
 | SSD1306 OLED | SDA / SCL | 21 / 22 | Jumper leads, not the board's OLED socket |
-| Zero button (humidity) | one leg | GPIO35 | Active HIGH: pressed = HIGH. **Needs an external 10k pull-down**, see below |
-| | other leg | 3V3 | |
-| 10k resistor | | GPIO35 to GND | |
+| Zero button (humidity) | one leg | GPIO32 | e.g. base board KEY1. No resistor needed (internal pull-up) |
+| | other leg | GND | KEY1 already goes to GND on the base board |
 
-### Is GPIO35 OK for the button?
+### Button pin
 
-Yes, with one extra resistor. GPIO35 is input-only, which is fine for a button, and the base board doesn't connect anything else to it. But GPIO34 to 39 have no internal pull-up or pull-down. Without a resistor the pin floats and reads random presses.
+The button is on GPIO32, which has built-in pull-up and pull-down resistors, so you don't need an external resistor. By default it's **active LOW** (`BTN_PRESSED = LOW`): the button connects GPIO32 to GND, the way the base board's KEY1 to KEY4 are wired, and the internal pull-up holds the pin HIGH when the button is released.
 
-The button is **active HIGH**: pressing it connects GPIO35 to 3V3.
+For a button to 3V3 instead, set `BTN_PRESSED = HIGH`. The sketch then switches to the internal pull-down automatically.
 
-```
-3V3 ───[button]───┬── GPIO35
-                  │
-                [10k]
-                  │
-GND ──────────────┘
-```
-
-Not pressed: the 10k holds GPIO35 LOW. Pressed: the button pulls it to 3V3 (HIGH). A 4.7k to 10k resistor works.
-
-The base board's KEY1 to KEY4 buttons are wired to GND, so they can only pull a pin LOW. For active HIGH, use a loose button to 3V3. To use KEY1 instead, set `BTN_PRESSED = LOW` and fit a 10k from GPIO35 to 3V3.
+(GPIO35 was tried first. It has no internal pull resistors, so without an external one it floated and zeroed randomly.)
 
 ## What the button does
 
-It's a **zero button for humidity only**. Press it and the humidity reading at that moment becomes the new 0 %. From then on, `humidity_pct` shows the change from that point, so it goes negative if the air gets drier. Temperature is never changed.
+It's a **toggle zero for humidity only**. The first press makes the humidity reading at that moment the new 0 %. From then on, `humidity_pct` shows the change from that point, so it goes negative if the air gets drier. The next press turns the zero off and goes back to raw humidity, and so on. Temperature is never changed.
 
-The OLED shows `ZEROED` for 3 s after a press. The zero isn't remembered. Every reset (the RST button or power-up) starts again from raw humidity. A press is ignored until the first valid reading arrives.
+The OLED shows `ZEROED` in the top right while the zero is on. The zero isn't remembered. Every reset (the RST button or power-up) starts with raw humidity. Turning the zero on is ignored until the first valid reading arrives.
 
 ## OLED display
 
