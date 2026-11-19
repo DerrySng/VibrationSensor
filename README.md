@@ -47,7 +47,8 @@ If you'd rather keep the buses separate, connect the DS1302 to any 3 free GPIOs 
 
 The DS1302's DAT (I/O) wire must go to **GPIO23**, not GPIO19 as in the kit's own example.
 
-- **Automatic on upload:** the first boot after every new upload sets the RTC to the compile time, with nothing added, so it ends up behind by however long compiling and uploading took. Pressing RST or power-cycling does *not* change the clock. Only a new upload does. A brand-new RTC, or one whose battery was removed, is also set to the compile time.
+- **Automatic from WiFi/NTP (recommended):** fill in `WIFI_SSID` and `WIFI_PASS` near the top of the sketch. At every boot it joins WiFi (up to 10 s), gets the time from NTP (up to 8 s), and writes it to the RTC at the start of a second, in Singapore time (`TZ_OFFSET_S = 8 * 3600`). Then it turns WiFi **off** before logging starts, so the radio can't disturb 1600 Hz sampling. With no WiFi in range, or the SSID left empty, it skips this and uses the RTC as below, so the logger still works in the field. Don't push your real WiFi password to GitHub.
+- **Automatic on upload (when NTP didn't run):** the first boot after every new upload sets the RTC to the compile time, with nothing added, so it ends up behind by however long compiling and uploading took. Pressing RST or power-cycling does *not* change the clock. Only a new upload does. A brand-new RTC, or one whose battery was removed, is also set to the compile time.
 - **Exact to the second:** open Serial Monitor at 115200 with the line ending set to **Newline**. Type a time a few seconds ahead of a reference clock (e.g. time.is) as `YYYY-MM-DD HH:MM:SS`, and press Enter exactly when the reference clock reaches that second. The sketch sets the RTC and restarts, and logging continues in a new file. A wrong format prints `Time not understood` and changes nothing.
 - At each boot the sketch waits for the RTC's seconds to tick over before reading it, so the time starts on the exact second. Expect a drift of about 1 to 2 s a day after setting.
 
@@ -87,6 +88,8 @@ date,time,us,x_g,y_g,z_g
 
 ```
 ADXL375 SD logger
+WiFi: connecting to MyWiFi...
+NTP: RTC set to 2026-11-19 09:29:58
 RTC: 2026-11-19 09:30:00
 ADXL375 DEVID: 0xE5
 Logging to /20261119_093000.csv

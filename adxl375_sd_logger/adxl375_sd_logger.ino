@@ -11,7 +11,10 @@
 //      100 ms of Z readings and uses them as the new zero for Z ONLY (X and Y are always raw),
 //      so Z reads ~0 g instead of ~1 g of gravity. Next press goes back
 //      to raw values, and so on. The zero is NOT remembered: every reset starts raw.
-//   6. Every NEW upload sets the RTC to the compile time. For an exact second, type the time
+//   6. At boot, if WIFI_SSID is filled in, joins WiFi for up to ~15 s, gets the time from NTP
+//      and writes it to the RTC on the exact second, then turns WiFi OFF before logging starts.
+//      No WiFi (or SSID left empty): it carries on with the RTC as below.
+//   7. Every NEW upload sets the RTC to the compile time (only if NTP failed). For an exact second, type the time
 //      in Serial Monitor (115200, line ending "Newline") as  YYYY-MM-DD HH:MM:SS  and press
 //      Enter on that second; the RTC is set and the ESP32 restarts with a new log file.
 //
@@ -31,6 +34,8 @@
 #include <Preferences.h>       // small store in flash: remembers which build last set the RTC
 #include <time.h>              // struct tm, mktime, gmtime_r
 #include "esp_timer.h"         // 64-bit microsecond timer (does not wrap like micros())
+#include <WiFi.h>              // only used at boot, to get the time from NTP
+#include <sys/time.h>          // gettimeofday: NTP time with microseconds
 
 // ---- Pins: for the Prechin ESP32 base board (checked against its schematic). ----
 // Avoid strapping pins (0, 2, 5, 12, 15) and input-only pins (34-39) for outputs.
@@ -64,6 +69,13 @@ const uint32_t FLUSH_INTERVAL_MS  = 1000;  // max data lost on power cut
 const uint32_t PRINT_INTERVAL_MS  = 500;   // Serial preview rate
 const float    G_PER_LSB          = 0.049; // ADXL375 datasheet: 49 mg/LSB
 const int      ZERO_SAMPLES       = 160;   // 100 ms average when the zero button is pressed
+
+// ---- WiFi / NTP time sync at boot ----
+// Fill in your WiFi to set the RTC from the internet at every boot. Leave "" to skip.
+// Do NOT push your real password to GitHub.
+const char    *WIFI_SSID          = "";
+const char    *WIFI_PASS          = "";
+const long     TZ_OFFSET_S        = 8 * 3600; // Singapore is UTC+8; the RTC and log use local time
 
 // ---- ADXL375 registers (addresses from the datasheet) ----
 const uint8_t REG_DEVID       = 0x00;  // reads 0xE5
@@ -205,6 +217,51 @@ void rtcWrite(const struct tm &t) {
   rtcSelect(false);
 }
 
+// Show a short status line on the OLED (only used during boot).
+void oledMsg(const char *msg) {
+  if (!oledOk) return;
+  oled.clearDisplay(); oled.setTextSize(1); oled.setCursor(0, 0);
+  oled.println(msg); oled.display();
+}
+
+// Join WiFi, get the time from NTP and write it to the RTC exactly at the start of a second.
+// WiFi is switched off afterwards so it can't disturb 1600 Hz sampling (or drain power).
+// Returns false (and leaves the RTC alone) if the SSID is empty, WiFi or NTP fails.
+bool ntpSync() {
+  if (WIFI_SSID[0] == 0) return false;
+  Serial.printf("WiFi: connecting to %s...\n", WIFI_SSID);
+  oledMsg("WiFi: syncing time...");
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(WIFI_SSID, WIFI_PASS);
+  uint32_t start = millis();
+  while (WiFi.status() != WL_CONNECTED && millis() - start < 10000) delay(200);
+  bool ok = false;
+  if (WiFi.status() == WL_CONNECTED) {
+    configTime(0, 0, "pool.ntp.org", "time.google.com");   // UTC; TZ_OFFSET_S is added below
+    start = millis();
+    while (time(nullptr) < 1700000000 && millis() - start < 8000) delay(100);  // wait for the answer
+    if (time(nullptr) >= 1700000000) {
+      struct timeval tv;
+      gettimeofday(&tv, nullptr);
+      time_t next = tv.tv_sec + 1 + TZ_OFFSET_S;            // the next whole second, local time
+      delayMicroseconds(1000000 - tv.tv_usec);              // wait until it starts...
+      struct tm t;
+      gmtime_r(&next, &t);
+      rtcWrite(t);                                          // ...and set the RTC right on it
+      Serial.printf("NTP: RTC set to %04d-%02d-%02d %02d:%02d:%02d\n", t.tm_year + 1900, t.tm_mon + 1,
+                    t.tm_mday, t.tm_hour, t.tm_min, t.tm_sec);
+      ok = true;
+    } else {
+      Serial.println("NTP: no answer, keeping the RTC time.");
+    }
+  } else {
+    Serial.println("WiFi: not connected, keeping the RTC time.");
+  }
+  WiFi.disconnect(true);
+  WiFi.mode(WIFI_OFF);
+  return ok;
+}
+
 // The time this sketch was compiled (from the __DATE__ and __TIME__ macros), used to
 // set the RTC after each new upload. It is your PC's local time, so the RTC ends up in your local time too.
 struct tm compileTime() {
@@ -274,6 +331,7 @@ void setup() {
   pinMode(SD_CS, OUTPUT);  digitalWrite(SD_CS, HIGH);   // keep the SD card deselected
   pinMode(RTC_CE, OUTPUT); digitalWrite(RTC_CE, LOW);
   pinMode(SD_SCK, OUTPUT); digitalWrite(SD_SCK, LOW);
+  bool ntpOk = ntpSync();   // WiFi -> NTP -> RTC; WiFi is off again afterwards
   struct tm now;
   rtcWaitForTick();
   bool rtcOk = rtcRead(now);
@@ -284,8 +342,10 @@ void setup() {
   prefs.begin("rtc", false);
   prefs.getString("build", lastBuild, sizeof(lastBuild));
   bool newBuild = strcmp(lastBuild, thisBuild) != 0;
-  if (!rtcOk || newBuild) {
-    // New upload, new RTC or flat battery: set it to the compile time, then read it back to check
+  if (ntpOk) {
+    prefs.putString("build", thisBuild);   // NTP already set it; don't overwrite with compile time
+  } else if (!rtcOk || newBuild) {
+    // No NTP, and a new upload / new RTC / flat battery: set it to the compile time, then read it back
     Serial.println(newBuild ? "RTC: new upload, setting to compile time" : "RTC: not running, setting to compile time");
     rtcWrite(compileTime());
     prefs.putString("build", thisBuild);
