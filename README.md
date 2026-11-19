@@ -3,9 +3,9 @@
 The sketch is `adxl375_sd_logger/adxl375_sd_logger.ino`. Use the Arduino IDE with the ESP32 board package and select the **ESP32 Dev Module** board.
 In Library Manager, install **Adafruit SSD1306**. It pulls in Adafruit GFX and BusIO automatically.
 
-## Wiring (suggested pins, all placeholders)
+## Wiring (Prechin ESP32 base board)
 
-Pin usage isn't decided yet. Every pin is a constant in one block at the top of the sketch, so you can change them later.
+Pins are checked against the base board schematic. The TF slot is soldered to GPIO4/18/19/23, so SD CS is 4. Wire the OLED with jumper leads, not the board's OLED socket, because that socket uses the SD card's GPIO18/23. Every pin is a constant in one block at the top of the sketch.
 
 | Part | Part pin | ESP32 pin | Notes |
 |---|---|---|---|
@@ -20,7 +20,7 @@ Pin usage isn't decided yet. Every pin is a constant in one block at the top of 
 | | SCK | GPIO18 | VSPI, **shared with DS1302 SCLK** |
 | | MISO | GPIO19 | VSPI |
 | | MOSI | GPIO23 | VSPI, **shared with DS1302 I/O** |
-| | CS | GPIO5 | |
+| | CS | GPIO4 | Hardwired on the base board |
 | DS1302 RTC | VCC | 3V3 | Add a CR2032 coin cell (or the module's battery) so it keeps time |
 | | GND | GND | |
 | | CLK (SCLK) | GPIO18 | Shared with SD SCK |
@@ -28,7 +28,7 @@ Pin usage isn't decided yet. Every pin is a constant in one block at the top of 
 | | RST (CE) | GPIO25 | Its own pin, must not be shared |
 | SSD1306 OLED (I2C) | VCC / GND | 3V3 / GND | |
 | | SDA | GPIO21 | |
-| | SCL | GPIO22 | Address 0x3C (some modules use 0x3D) |
+| | SCL | GPIO22 | Address 0x3C (some modules use 0x3D). Jumper leads, not the OLED socket |
 | Zero button | one leg | GPIO32 | Uses the internal pull-up |
 | | other leg | GND | |
 
