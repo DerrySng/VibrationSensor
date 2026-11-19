@@ -165,7 +165,7 @@ void rtcWrite(const struct tm &t) {
   rtcWriteByte(dec2bcd(t.tm_mon + 1));
   rtcWriteByte(dec2bcd(t.tm_wday + 1));
   rtcWriteByte(dec2bcd(t.tm_year - 100));
-  rtcWriteByte(0x80);                       // control: write-protect ON, so power-up/down glitches can't change the time
+  rtcWriteByte(0x00);                       // control: write-protect stays off
   rtcSelect(false);
 }
 
