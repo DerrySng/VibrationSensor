@@ -6,15 +6,20 @@
 //   1. On boot, reads the date/time from the DS1302 real-time clock.
 //   2. Sets up the ADXL375 accelerometer (+-200 g) at 1600 samples per second.
 //   3. Creates a new CSV file on the SD card and writes one line per sample.
-//   4. Shows the live X/Y/Z values and the clock on the OLED.
-//   5. When the zero button is pressed, takes the current reading as the new "zero".
+//   4. Shows the date, clock and live X/Y/Z values on the OLED.
+//   5. The zero button (GPIO32, e.g. base board KEY1) TOGGLES the zero: first press averages
+//      100 ms of readings and uses them as the new zero for X, Y and Z, next press goes back
+//      to raw values, and so on. The zero is NOT remembered: every reset starts raw.
+//   6. Every NEW upload sets the RTC to the compile time. For an exact second, type the time
+//      in Serial Monitor (115200, line ending "Newline") as  YYYY-MM-DD HH:MM:SS  and press
+//      Enter on that second; the RTC is set and the ESP32 restarts with a new log file.
 //
 // Libraries (Library Manager): "Adafruit SSD1306" (pulls in Adafruit GFX + BusIO).
 // Everything else ships with the ESP32 board package.
 //
 // Each boot creates a new file named from the RTC, e.g. /20261118_093000.csv
 // (falls back to /log_000.csv ... if the RTC is missing).
-// Columns: epoch_s (RTC time, seconds.microseconds), x_g, y_g, z_g
+// Columns: date, time (HH:MM:SS), us (microseconds within that second), x_g, y_g, z_g
 // =====================================================================================
 
 #include <SPI.h>               // SPI bus (accelerometer and SD card)
@@ -22,7 +27,7 @@
 #include <Wire.h>              // I2C bus (OLED)
 #include <Adafruit_GFX.h>      // text drawing for the OLED
 #include <Adafruit_SSD1306.h>  // OLED driver
-#include <Preferences.h>       // small key/value store in flash, keeps the zero offsets across reboots
+#include <Preferences.h>       // small store in flash: remembers which build last set the RTC
 #include <time.h>              // struct tm, mktime, gmtime_r
 #include "esp_timer.h"         // 64-bit microsecond timer (does not wrap like micros())
 
@@ -44,8 +49,12 @@ const int RTC_CE    = 25;
 const int OLED_SDA  = 21;
 const int OLED_SCL  = 22;
 const uint8_t OLED_ADDR = 0x3C;  // some modules use 0x3D
-// Zero button: momentary switch between this pin and GND
+// Zero button on GPIO32. GPIO32 has internal pull-up AND pull-down resistors,
+// so no external resistor is needed. The sketch picks the right one from BTN_PRESSED:
+//   LOW  (default): button between GPIO32 and GND, e.g. base board KEY1. Internal pull-up.
+//   HIGH          : button between GPIO32 and 3V3. Internal pull-down.
 const int ZERO_BTN  = 32;
+const int BTN_PRESSED = LOW;
 // ---- end of pins ----
 
 // ---- Settings ----
@@ -54,7 +63,6 @@ const uint32_t FLUSH_INTERVAL_MS  = 1000;  // max data lost on power cut
 const uint32_t PRINT_INTERVAL_MS  = 500;   // Serial preview rate
 const float    G_PER_LSB          = 0.049; // ADXL375 datasheet: 49 mg/LSB
 const int      ZERO_SAMPLES       = 160;   // 100 ms average when the zero button is pressed
-const bool     FORCE_SET_RTC      = false; // true = set RTC to the compile time on boot (then set back to false and re-upload)
 
 // ---- ADXL375 registers (addresses from the datasheet) ----
 const uint8_t REG_DEVID       = 0x00;  // reads 0xE5
@@ -76,7 +84,8 @@ uint32_t nextSampleUs, lastFlushMs, lastPrintMs, sampleCount;
 int64_t bootEpoch, bootTimerUs;  // RTC time at boot + matching esp_timer value
 
 // ---- Zero (offset) state ----
-float offX, offY, offZ;          // zero offsets in raw counts, saved in flash
+float offX, offY, offZ;          // zero offsets in raw counts, back to 0 on every reset
+bool zeroed = false;             // toggled by the zero button; false = raw values
 int zeroN = -1;                  // >= 0 while averaging for a zero
 int32_t sumX, sumY, sumZ;        // running sums while averaging
 
@@ -150,6 +159,15 @@ void rtcSelect(bool on) {
 uint8_t bcd2dec(uint8_t v) { return (v >> 4) * 10 + (v & 0x0F); }
 uint8_t dec2bcd(uint8_t v) { return ((v / 10) << 4) | (v % 10); }
 
+// Wait (up to 1.1 s) for the RTC's seconds to tick over, so the next read lands right at the
+// start of a second. Without this the boot time could be up to 1 s off.
+void rtcWaitForTick() {
+  auto sec = []() { rtcSelect(true); rtcWriteByte(0x81, true); uint8_t v = rtcReadByte(); rtcSelect(false); return v; };
+  uint8_t s0 = sec();
+  uint32_t start = millis();
+  while (sec() == s0 && millis() - start < 1100) {}
+}
+
 // Read date and time into t. Returns false if the clock is stopped or not connected.
 bool rtcRead(struct tm &t) {
   uint8_t r[7];                             // sec, min, hour, date, month, weekday, year
@@ -187,7 +205,7 @@ void rtcWrite(const struct tm &t) {
 }
 
 // The time this sketch was compiled (from the __DATE__ and __TIME__ macros), used to
-// set a new RTC. It is your PC's local time, so the RTC ends up in your local time too.
+// set the RTC after each new upload. It is your PC's local time, so the RTC ends up in your local time too.
 struct tm compileTime() {
   struct tm t = {};
   char mon[4];
@@ -202,8 +220,8 @@ struct tm compileTime() {
 
 // ================= Display (runs on core 0 so I2C never stalls sampling) =================
 // Redraws the OLED 5 times a second:
-//   line 1: clock + "OK" or "ZEROING"
-//   line 2: log file name
+//   line 1: clock + "ZEROING" (averaging), "ZEROED" (zero on) or "RAW" (zero off)
+//   line 2: date
 //   lines 3-5 (big text): X, Y, Z in g
 void displayTask(void *) {
   for (;;) {
@@ -216,8 +234,9 @@ void displayTask(void *) {
     oled.clearDisplay();
     oled.setTextSize(1);
     oled.setCursor(0, 0);
-    oled.printf("%02d:%02d:%02d  %s\n", t.tm_hour, t.tm_min, t.tm_sec, zeroN >= 0 ? "ZEROING" : "OK");
-    oled.println(logPath + 1);  // +1 skips the leading "/"
+    oled.printf("%02d:%02d:%02d  %s\n", t.tm_hour, t.tm_min, t.tm_sec,
+                zeroN >= 0 ? "ZEROING" : zeroed ? "ZEROED" : "RAW");
+    oled.printf("%04d-%02d-%02d\n", t.tm_year + 1900, t.tm_mon + 1, t.tm_mday);
     oled.setTextSize(2);
     oled.printf("X%7.2f\nY%7.2f\nZ%7.2f", dispX, dispY, dispZ);
     oled.display();
@@ -242,7 +261,7 @@ void setup() {
   delay(500);
   Serial.println("\nADXL375 SD logger");
 
-  pinMode(ZERO_BTN, INPUT_PULLUP);  // pin reads HIGH normally, LOW while pressed
+  pinMode(ZERO_BTN, BTN_PRESSED == LOW ? INPUT_PULLUP : INPUT_PULLDOWN);  // holds the pin at "not pressed"
 
   // OLED first, so later errors can be shown on it. Logging still works without it.
   Wire.begin(OLED_SDA, OLED_SCL);
@@ -255,11 +274,20 @@ void setup() {
   pinMode(RTC_CE, OUTPUT); digitalWrite(RTC_CE, LOW);
   pinMode(SD_SCK, OUTPUT); digitalWrite(SD_SCK, LOW);
   struct tm now;
+  rtcWaitForTick();
   bool rtcOk = rtcRead(now);
-  if (!rtcOk || FORCE_SET_RTC) {
-    // New RTC or flat battery: start it at the compile time, then read it back to check
-    Serial.println(rtcOk ? "RTC: forced set to compile time" : "RTC: not running, setting to compile time");
+  // Is this the first boot of a new upload? Compare this build's compile stamp with the one
+  // saved in flash. Plain resets (RST, power) keep the RTC time; only a new upload sets it.
+  const char *thisBuild = __DATE__ " " __TIME__;
+  char lastBuild[24] = "";
+  prefs.begin("rtc", false);
+  prefs.getString("build", lastBuild, sizeof(lastBuild));
+  bool newBuild = strcmp(lastBuild, thisBuild) != 0;
+  if (!rtcOk || newBuild) {
+    // New upload, new RTC or flat battery: set it to the compile time, then read it back to check
+    Serial.println(newBuild ? "RTC: new upload, setting to compile time" : "RTC: not running, setting to compile time");
     rtcWrite(compileTime());
+    prefs.putString("build", thisBuild);
     rtcOk = rtcRead(now);
   }
   // Remember the RTC time and the ESP32 timer at the same moment.
@@ -289,10 +317,6 @@ void setup() {
   adxlWrite(REG_BW_RATE, 0x0E);     // 1600 Hz output data rate
   adxlWrite(REG_POWER_CTL, 0x08);   // measurement mode
 
-  // Saved zero offsets (0 if the button was never pressed)
-  prefs.begin("adxl", false);
-  offX = prefs.getFloat("x", 0); offY = prefs.getFloat("y", 0); offZ = prefs.getFloat("z", 0);
-  Serial.printf("Zero offsets (counts): %.1f %.1f %.1f\n", offX, offY, offZ);
 
   // SD card on VSPI (takes over SD_SCK / SD_MOSI from here on)
   SPI.begin(SD_SCK, SD_MISO, SD_MOSI, -1);
@@ -310,7 +334,7 @@ void setup() {
   }
   logFile = SD.open(logPath, FILE_WRITE);
   if (!logFile) halt("ERROR: could not create log file.");
-  logFile.println("epoch_s,x_g,y_g,z_g");  // CSV header
+  logFile.println("date,time,us,x_g,y_g,z_g");  // CSV header
   logFile.flush();
   Serial.printf("Logging to %s\n", logPath);
 
@@ -321,13 +345,47 @@ void setup() {
   lastFlushMs = lastPrintMs = millis();
 }
 
+// Set the RTC from a line typed in Serial Monitor: "YYYY-MM-DD HH:MM:SS".
+// The RTC shares pins with the SD card, so: close the file, release the SPI bus,
+// write the RTC, then restart. The new boot reads the fresh time and starts a new file.
+void checkSerialTimeSet() {
+  static char line[24];
+  static uint8_t len;
+  while (Serial.available()) {
+    char c = Serial.read();
+    if (c != '\n' && c != '\r') { if (len < sizeof(line) - 1) line[len++] = c; continue; }
+    if (len == 0) continue;               // ignore the extra \r or \n of a CR+LF line ending
+    line[len] = 0;
+    len = 0;
+    struct tm t = {};
+    if (sscanf(line, "%d-%d-%d %d:%d:%d", &t.tm_year, &t.tm_mon, &t.tm_mday,
+               &t.tm_hour, &t.tm_min, &t.tm_sec) != 6 || t.tm_year < 2000 || t.tm_year > 2099 ||
+        t.tm_mon < 1 || t.tm_mon > 12 || t.tm_mday < 1 || t.tm_mday > 31 ||
+        t.tm_hour > 23 || t.tm_min > 59 || t.tm_sec > 59) {
+      Serial.println("Time not understood. Type it as YYYY-MM-DD HH:MM:SS");
+      continue;
+    }
+    t.tm_year -= 1900; t.tm_mon -= 1;
+    mktime(&t);                           // fills in tm_wday
+    logFile.close();                      // nothing is lost: every line is already flushed
+    SD.end();
+    SPI.end();                            // give SCK/MOSI back so they can be bit-banged
+    pinMode(SD_CS, OUTPUT);  digitalWrite(SD_CS, HIGH);
+    pinMode(SD_SCK, OUTPUT); digitalWrite(SD_SCK, LOW);
+    rtcWrite(t);
+    Serial.printf("RTC set to %s. Restarting...\n", line);
+    delay(100);
+    ESP.restart();
+  }
+}
+
 // ================= loop(): one sample per call, every 625 us =================
 void loop() {
   if ((int32_t)(micros() - nextSampleUs) < 0) return;  // not time yet
   int64_t tUs = esp_timer_get_time();                   // timestamp for this sample
   uint32_t t = micros();
   nextSampleUs += SAMPLE_INTERVAL_US;
-  // If an SD write stalled us, skip ahead instead of bursting stale samples. The gap shows in epoch_s.
+  // If an SD write stalled us, skip ahead instead of bursting stale samples. The gap shows in the time/us columns.
   if ((int32_t)(t - nextSampleUs) > (int32_t)SAMPLE_INTERVAL_US) nextSampleUs = t + SAMPLE_INTERVAL_US;
 
   // Read X, Y, Z: each is 2 bytes, low byte first, signed
@@ -337,22 +395,31 @@ void loop() {
   int16_t ry = b[3] << 8 | b[2];
   int16_t rz = b[5] << 8 | b[4];
 
-  // Zero button: on press, average the next ZERO_SAMPLES readings and use them as the new zero
+  // Zero button toggles: raw -> zeroed (average the next ZERO_SAMPLES readings and use them
+  // as the new zero) -> raw again, and so on.
   uint32_t now = millis();
-  static bool lastBtn = HIGH;
+  static int lastBtn = !BTN_PRESSED;
   static uint32_t lastBtnMs;
-  bool btn = digitalRead(ZERO_BTN);
+  int btn = digitalRead(ZERO_BTN);
   if (btn != lastBtn && now - lastBtnMs > 50) {   // 50 ms debounce
     lastBtn = btn;
     lastBtnMs = now;
-    if (btn == LOW && zeroN < 0) { zeroN = 0; sumX = sumY = sumZ = 0; }  // start averaging
+    if (btn == BTN_PRESSED && zeroN < 0) {
+      if (zeroed) {                               // zero on -> off: back to raw values
+        zeroed = false;
+        offX = offY = offZ = 0;
+        Serial.println("Zero OFF (raw values).");
+      } else {
+        zeroN = 0; sumX = sumY = sumZ = 0;        // zero off -> on: start averaging
+      }
+    }
   }
   if (zeroN >= 0) {
     sumX += rx; sumY += ry; sumZ += rz;
     if (++zeroN == ZERO_SAMPLES) {
       offX = sumX / (float)ZERO_SAMPLES; offY = sumY / (float)ZERO_SAMPLES; offZ = sumZ / (float)ZERO_SAMPLES;
-      prefs.putFloat("x", offX); prefs.putFloat("y", offY); prefs.putFloat("z", offZ);  // survives reboot
-      Serial.printf("Zeroed. Offsets (counts): %.1f %.1f %.1f\n", offX, offY, offZ);
+      Serial.printf("Zero ON. Offsets (counts): %.1f %.1f %.1f\n", offX, offY, offZ);
+      zeroed = true;
       zeroN = -1;                                 // done
     }
   }
@@ -363,9 +430,20 @@ void loop() {
   float z = (rz - offZ) * G_PER_LSB;
   dispX = x; dispY = y; dispZ = z;                // hand the latest values to the OLED task
 
-  // Write one CSV line: "seconds.microseconds,x,y,z"
+  // Write one CSV line: "YYYY-MM-DD,HH:MM:SS,microseconds,x,y,z"
+  // Date and time are separate columns so Excel keeps the seconds; us is the position within that second.
   int64_t e = bootEpoch * 1000000LL + (tUs - bootTimerUs);
-  logFile.printf("%lld.%06lld,%.3f,%.3f,%.3f\n", e / 1000000, e % 1000000, x, y, z);
+  time_t sec = (time_t)(e / 1000000);
+  static time_t lastSec = -1;
+  static char stamp[24];                          // "YYYY-MM-DD,HH:MM:SS", rebuilt once a second
+  if (sec != lastSec) {
+    struct tm tm;
+    gmtime_r(&sec, &tm);
+    snprintf(stamp, sizeof(stamp), "%04d-%02d-%02d,%02d:%02d:%02d", tm.tm_year + 1900, tm.tm_mon + 1,
+             tm.tm_mday, tm.tm_hour, tm.tm_min, tm.tm_sec);
+    lastSec = sec;
+  }
+  logFile.printf("%s,%06ld,%.3f,%.3f,%.3f\n", stamp, (long)(e % 1000000), x, y, z);
   sampleCount++;
 
   // Push buffered data to the card once a second, so a power cut loses at most ~1 s
@@ -378,4 +456,6 @@ void loop() {
     Serial.printf("X=%7.2f g  Y=%7.2f g  Z=%7.2f g  samples=%lu\n", x, y, z, (unsigned long)sampleCount);
     lastPrintMs = now;
   }
+
+  checkSerialTimeSet();                           // set the RTC from a typed time, then restart
 }

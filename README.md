@@ -29,8 +29,8 @@ Pins are checked against the base board schematic. The TF slot is soldered to GP
 | SSD1306 OLED (I2C) | VCC / GND | 3V3 / GND | |
 | | SDA | GPIO21 | |
 | | SCL | GPIO22 | Address 0x3C (some modules use 0x3D). Jumper leads, not the OLED socket |
-| Zero button | one leg | GPIO32 | Uses the internal pull-up |
-| | other leg | GND | |
+| Zero button | one leg | GPIO32 | e.g. base board KEY1. Uses the internal pull-up, no resistor needed |
+| | other leg | GND | KEY1 already goes to GND. For a button to 3V3 set `BTN_PRESSED = HIGH` (internal pull-down) |
 
 ### How the RTC shares the SD pins
 
@@ -45,60 +45,63 @@ If you'd rather keep the buses separate, connect the DS1302 to any 3 free GPIOs 
 
 ## Setting the RTC
 
-- A new RTC, or one whose battery was removed, is set automatically to the PC's time when the sketch was compiled. So upload right after compiling.
-- To set it again later, change `FORCE_SET_RTC = true`, upload, then change it back to `false` and upload again. If you skip the second upload, every reboot resets the clock to the old compile time.
+The DS1302's DAT (I/O) wire must go to **GPIO23**, not GPIO19 as in the kit's own example.
+
+- **Automatic on upload:** the first boot after every new upload sets the RTC to the compile time, with nothing added, so it ends up behind by however long compiling and uploading took. Pressing RST or power-cycling does *not* change the clock. Only a new upload does. A brand-new RTC, or one whose battery was removed, is also set to the compile time.
+- **Exact to the second:** open Serial Monitor at 115200 with the line ending set to **Newline**. Type a time a few seconds ahead of a reference clock (e.g. time.is) as `YYYY-MM-DD HH:MM:SS`, and press Enter exactly when the reference clock reaches that second. The sketch sets the RTC and restarts, and logging continues in a new file. A wrong format prints `Time not understood` and changes nothing.
+- At each boot the sketch waits for the RTC's seconds to tick over before reading it, so the time starts on the exact second. Expect a drift of about 1 to 2 s a day after setting.
 
 ## OLED display
 
-The display shows the sensor's live X/Y/Z status in g, updated 5 times a second:
+The display shows the clock, date and the sensor's live X/Y/Z in g, updated 5 times a second:
 
 ```
-09:30:12  OK
-20261118_093000.csv
+09:30:12  ZEROED
+2026-11-19
 X   0.05
 Y  -0.10
 Z   0.00
 ```
 
-The top line shows `ZEROING` while the zero button is working. The display runs on the ESP32's other core, so it doesn't interrupt the 1600 Hz sampling. If no OLED is found, the sketch still logs.
+The top right shows `RAW` (no zero), `ZEROING` (averaging after a press) or `ZEROED` (zero on). The display runs on the ESP32's other core, so it doesn't interrupt the 1600 Hz sampling. If no OLED is found, the sketch still logs.
 
-## Zero button
+## Zero button (toggle)
 
-Press the button and hold the sensor still for 100 ms. The sketch averages 160 readings and uses that average as the new zero for X, Y and Z. That also removes the 1 g of gravity on whichever axis points up.
-
-The offsets are saved in flash, so they're kept after a reboot. Pressing the button in the middle of a run shifts all the values that follow in that file.
+- **First press:** hold the sensor still for 100 ms. The sketch averages 160 readings and uses that average as the new zero for X, Y and Z. That also removes the 1 g of gravity on whichever axis points up.
+- **Next press:** turns the zero off and goes back to raw values. Each press after that toggles again.
+- The zero isn't remembered. Every reset (RST or power-up) starts with raw values. Toggling in the middle of a run shifts all the values that follow in that file.
 
 ## Output
 
-Each boot creates a file named after the RTC time, for example `/20261118_093000.csv`. Without an RTC the files are named `/log_000.csv`, `/log_001.csv`, and so on.
+Each boot creates a file named after the RTC time, for example `/20261119_093000.csv`. Without an RTC the files are named `/log_000.csv`, `/log_001.csv`, and so on.
 
 ```
-epoch_s,x_g,y_g,z_g
-1763458200.000000,0.049,-0.098,0.000
-1763458200.000625,0.000,-0.049,0.049
+date,time,us,x_g,y_g,z_g
+2026-11-19,09:30:00,000000,0.049,-0.098,0.000
+2026-11-19,09:30:00,000625,0.000,-0.049,0.049
 ```
 
-`epoch_s` is the RTC time as Unix seconds with microsecond decimals, in whatever time zone the RTC was set to. In Excel you can convert it with `=A2/86400+DATE(1970,1,1)`.
+`date` and `time` are separate columns so Excel keeps the seconds. If it doesn't, set the time column's format to `hh:mm:ss`. `us` is the microsecond within that second, so samples 625 µs apart can be told apart.
 
 ## Expected Serial output (115200 baud)
 
 ```
 ADXL375 SD logger
-RTC: 2026-11-18 09:30:00
+RTC: 2026-11-19 09:30:00
 ADXL375 DEVID: 0xE5
-Zero offsets (counts): 0.0 0.0 0.0
-Logging to /20261118_093000.csv
+Logging to /20261119_093000.csv
 X=   0.05 g  Y=  -0.10 g  Z=   1.03 g  samples=812
-Zeroed. Offsets (counts): 1.2 -2.0 20.6
+Zero ON. Offsets (counts): 1.2 -2.0 20.6
 X=   0.00 g  Y=   0.05 g  Z=   0.00 g  samples=1612
+Zero OFF (raw values).
 ```
 
 Errors you might see:
 - `ADXL375 DEVID: 0x00/0xFF` means the sensor isn't answering. Check its wiring and the 3.3 V supply.
-- `RTC not found` means a CE, CLK or DAT wire is wrong. Logging continues, with timestamps counted from boot.
+- `RTC not found` means a CE, CLK or DAT wire is wrong (DAT goes to GPIO23). Logging continues, with timestamps counted from 1970-01-01.
 - `SD card mount failed` means the card isn't formatted FAT32, isn't inserted, or the wiring is wrong.
 
 ## Known limits
 
-- When the card writes or flushes, the SD card can stall for a few ms. Samples taken during the stall are skipped, and the skip shows as a gap in `epoch_s`. The fix for that is the sensor's FIFO or a separate SD writer task.
+- When the card writes or flushes, the SD card can stall for a few ms. Samples taken during the stall are skipped, and the skip shows as a gap in the `time`/`us` columns. The fix for that is the sensor's FIFO or a separate SD writer task.
 - The timestamp's absolute accuracy is ±1 s, because the DS1302 only counts whole seconds. Within a file, timestamps are accurate to the microsecond relative to each other. The ESP32 crystal drifts by about 1 to 2 s a day, and the clock is re-synced to the RTC at each boot.
