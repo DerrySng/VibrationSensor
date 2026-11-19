@@ -41,9 +41,9 @@ The base board's KEY1 to KEY4 buttons are wired to GND, so they can only pull a 
 
 ## What the button does
 
-It's a **zero button for humidity only**. Press it and the humidity reading at that moment becomes the new 0 %. From then on, `humidity_pct` shows the change from that point, so it goes negative if the air gets drier. Temperature is never changed.
+It's a **toggle zero for humidity only**. The first press makes the humidity reading at that moment the new 0 %. From then on, `humidity_pct` shows the change from that point, so it goes negative if the air gets drier. The next press turns the zero off and goes back to raw humidity, and so on. Temperature is never changed.
 
-The OLED shows `ZEROED` for 3 s after a press. The zero isn't remembered. Every reset (the RST button or power-up) starts again from raw humidity. A press is ignored until the first valid reading arrives.
+The OLED shows `ZEROED` in the top right while the zero is on. The zero isn't remembered. Every reset (the RST button or power-up) starts with raw humidity. Turning the zero on is ignored until the first valid reading arrives.
 
 ## OLED display
 

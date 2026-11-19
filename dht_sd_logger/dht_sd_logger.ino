@@ -9,8 +9,8 @@
 //   2. Creates a new CSV file on the SD card.
 //   3. Every 2 seconds reads temperature + humidity and writes one CSV line.
 //   4. Shows the time, temperature and humidity on the OLED.
-//   5. The zero button (GPIO35) zeroes the HUMIDITY only: the humidity at the moment of
-//      the press becomes the new 0 %. Temperature is never changed. The zero is NOT
+//   5. The zero button (GPIO35) TOGGLES a humidity-only zero: first press makes the humidity
+//      at that moment the new 0 %, next press goes back to raw, and so on. Temperature is never changed. The zero is NOT
 //      remembered: every reset (RST button or power-up) starts again from raw humidity.
 //
 // Libraries (Library Manager):
@@ -76,7 +76,7 @@ bool oledOk;                     // false if no OLED answered at boot
 float humOff = 0;                // humidity zero offset in % RH, back to 0 on every reset
 float lastRawH = NAN;            // latest humidity straight from the sensor (before the offset)
 float lastT = NAN, lastH = NAN;  // latest temperature and zeroed humidity, shown on the OLED
-uint32_t zeroedMs;               // when the button was last pressed, to show "ZEROED" for 3 s
+bool zeroed = false;             // toggled by each button press; false = raw humidity
 
 // ================= DS1302 (3-wire, LSB first) =================
 // Only used in setup(), BEFORE the SD card takes over SCK/MOSI. With CE low the DS1302
@@ -189,7 +189,7 @@ time_t nowEpoch() { return (time_t)(bootEpoch + (esp_timer_get_time() - bootTime
 //   line 2 (big): clock
 //   line 3 (big): temperature
 //   line 4 (big): humidity
-//   top right: "ZEROED" for 3 s after the zero button is pressed
+//   top right: "ZEROED" while the humidity zero is on
 void drawOled(float tC, float hum) {
   if (!oledOk) return;
   time_t tt = nowEpoch();
@@ -199,7 +199,7 @@ void drawOled(float tC, float hum) {
   oled.setTextSize(1);
   oled.setCursor(0, 0);
   oled.printf("%04d-%02d-%02d   %s", t.tm_year + 1900, t.tm_mon + 1, t.tm_mday,
-              (zeroedMs && millis() - zeroedMs < 3000) ? "ZEROED" : "");
+              zeroed ? "ZEROED" : "");
   oled.setTextSize(2);
   oled.setCursor(0, 12);
   oled.printf("%02d:%02d:%02d\n", t.tm_hour, t.tm_min, t.tm_sec);
@@ -335,12 +335,18 @@ void loop() {
   if (btn != lastBtn && ms - lastBtnMs > 50) {
     lastBtn = btn;
     lastBtnMs = ms;
-    // Pressed: the latest raw humidity becomes the new zero. Temperature is left alone.
-    if (btn == BTN_PRESSED && !isnan(lastRawH)) {
+    // Each press toggles: raw -> zeroed (latest raw humidity becomes 0 %) -> raw again.
+    // Temperature is left alone.
+    if (btn == BTN_PRESSED && zeroed) {
+      zeroed = false;
+      humOff = 0;
+      lastH = lastRawH;                         // show raw humidity straight away
+      Serial.println("Humidity zero OFF (raw).");
+    } else if (btn == BTN_PRESSED && !isnan(lastRawH)) {
+      zeroed = true;
       humOff = lastRawH;
       lastH = 0;                                // show 0 % straight away
-      zeroedMs = ms;
-      Serial.printf("Humidity zeroed. Offset: %.1f %%\n", humOff);
+      Serial.printf("Humidity zero ON. Offset: %.1f %%\n", humOff);
     } else if (btn == BTN_PRESSED) {
       Serial.println("Zero ignored: no valid humidity reading yet.");
     }
