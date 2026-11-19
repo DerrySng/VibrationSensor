@@ -51,9 +51,11 @@ const uint8_t OLED_ADDR = 0x3C;  // some modules use 0x3D
 // DHT data line. 27 is what the kit's own DHT11 example uses (free now the ADXL375 is gone).
 // The base board's DHT11 socket (J4) already has a 10k pull-up; jumper its signal pin to GPIO27.
 const int DHT_PIN   = 27;
-// Zero button (humidity only) on GPIO35. GPIO35 is INPUT-ONLY and has NO internal pull-up,
-// so it needs an external 10k resistor from GPIO35 to 3V3. Button between GPIO35 and GND.
+// Zero button (humidity only) on GPIO35, ACTIVE HIGH: pressed = HIGH.
+// Wire the button between GPIO35 and 3V3. GPIO35 is input-only with NO internal pull-down,
+// so add a 10k resistor from GPIO35 to GND to hold it LOW when the button is released.
 const int ZERO_BTN  = 35;
+const int BTN_PRESSED = HIGH;  // change to LOW for a button to GND with a pull-up
 // ---- end of pins ----
 
 // ---- Settings ----
@@ -223,7 +225,7 @@ void setup() {
   delay(500);
   Serial.println("\nDHT SD logger (dummy tester)");
 
-  pinMode(ZERO_BTN, INPUT);  // plain INPUT: GPIO35 has no internal pull-up, the external 10k does the job
+  pinMode(ZERO_BTN, INPUT);  // plain INPUT: GPIO35 has no internal pull resistors, the external 10k does the job
   dht.begin();
 
   // OLED first, so later errors can be shown on it. Logging still works without it.
@@ -326,20 +328,20 @@ void loop() {
   uint32_t ms = millis();
   checkSerialTimeSet();
 
-  // Button: LOW = pressed (the external pull-up holds it HIGH otherwise). 50 ms debounce.
-  static bool lastBtn = HIGH;
+  // Button: BTN_PRESSED (HIGH) = pressed, the external pull-down holds it LOW otherwise. 50 ms debounce.
+  static int lastBtn = !BTN_PRESSED;
   static uint32_t lastBtnMs;
-  bool btn = digitalRead(ZERO_BTN);
+  int btn = digitalRead(ZERO_BTN);
   if (btn != lastBtn && ms - lastBtnMs > 50) {
     lastBtn = btn;
     lastBtnMs = ms;
     // Pressed: the latest raw humidity becomes the new zero. Temperature is left alone.
-    if (btn == LOW && !isnan(lastRawH)) {
+    if (btn == BTN_PRESSED && !isnan(lastRawH)) {
       humOff = lastRawH;
       lastH = 0;                                // show 0 % straight away
       zeroedMs = ms;
       Serial.printf("Humidity zeroed. Offset: %.1f %%\n", humOff);
-    } else if (btn == LOW) {
+    } else if (btn == BTN_PRESSED) {
       Serial.println("Zero ignored: no valid humidity reading yet.");
     }
   }

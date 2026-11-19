@@ -17,25 +17,27 @@ Using a DHT22 instead? Change `#define DHT_TYPE DHT11` to `DHT22`.
 | SD card | SCK / MISO / MOSI / CS | 18 / 19 / 23 / 4 | Base board TF slot, hardwired |
 | DS1302 RTC | CLK / DAT / RST(CE) | 18 / 23 / 25 | Shares SD SCK/MOSI, read once at boot (same as the ADXL375 logger) |
 | SSD1306 OLED | SDA / SCL | 21 / 22 | Jumper leads, not the board's OLED socket |
-| Zero button (humidity) | one leg | GPIO35 | **Needs an external 10k pull-up**, see below |
-| | other leg | GND | |
-| 10k resistor | | GPIO35 to 3V3 | |
+| Zero button (humidity) | one leg | GPIO35 | Active HIGH: pressed = HIGH. **Needs an external 10k pull-down**, see below |
+| | other leg | 3V3 | |
+| 10k resistor | | GPIO35 to GND | |
 
 ### Is GPIO35 OK for the button?
 
-Yes, with one extra resistor. GPIO35 is input-only, which is fine for a button, and the base board doesn't connect anything else to it. But GPIO34 to 39 have no internal pull-up, so `INPUT_PULLUP` does nothing on them. Without a resistor the pin floats and reads random presses.
+Yes, with one extra resistor. GPIO35 is input-only, which is fine for a button, and the base board doesn't connect anything else to it. But GPIO34 to 39 have no internal pull-up or pull-down. Without a resistor the pin floats and reads random presses.
+
+The button is **active HIGH**: pressing it connects GPIO35 to 3V3.
 
 ```
-3V3 ──[10k]──┬── GPIO35
-             │
-          [button]
-             │
-GND ─────────┘
+3V3 ───[button]───┬── GPIO35
+                  │
+                [10k]
+                  │
+GND ──────────────┘
 ```
 
-Not pressed: the 10k holds GPIO35 HIGH. Pressed: the button pulls it to GND (LOW). A 4.7k to 10k resistor works. If you'd rather not add a resistor, use a pin with an internal pull-up (GPIO32 or 33), change `ZERO_BTN`, and change `pinMode(ZERO_BTN, INPUT)` to `INPUT_PULLUP`.
+Not pressed: the 10k holds GPIO35 LOW. Pressed: the button pulls it to 3V3 (HIGH). A 4.7k to 10k resistor works.
 
-If you use one of the base board's KEY1 to KEY4 buttons instead of a loose one, they also go to GND with no pull-up, so you still need the 10k.
+The base board's KEY1 to KEY4 buttons are wired to GND, so they can only pull a pin LOW. For active HIGH, use a loose button to 3V3. To use KEY1 instead, set `BTN_PRESSED = LOW` and fit a 10k from GPIO35 to 3V3.
 
 ## What the button does
 
