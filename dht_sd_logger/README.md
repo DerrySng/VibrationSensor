@@ -59,6 +59,8 @@ A failed sensor read is logged as `nan`, so you can still see the logger is runn
 
 ## Setting the RTC (accurate to the second)
 
+**One click from the PC:** double-click `rtc_sync/Sync RTC.bat`, pick the COM port and press Sync RTC. It does these steps for you, on the exact second. Or by hand:
+
 1. Open Serial Monitor at 115200 baud, with the line ending set to **Newline** (or Both NL & CR).
 2. Type the time to set, a few seconds ahead of a reference clock (e.g. time.is), as `YYYY-MM-DD HH:MM:SS`, e.g. `2026-11-19 11:15:00`.
 3. Press Enter exactly when the reference clock reaches that second.
