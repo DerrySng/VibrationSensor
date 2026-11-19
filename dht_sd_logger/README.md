@@ -41,7 +41,7 @@ If you use one of the base board's KEY1 to KEY4 buttons instead of a loose one, 
 
 It's a **zero button for humidity only**. Press it and the humidity reading at that moment becomes the new 0 %. From then on, `humidity_pct` shows the change from that point, so it goes negative if the air gets drier. Temperature is never changed.
 
-The OLED shows `ZEROED` for 3 s after a press. The offset is saved in flash, so it's kept after a reboot. To go back to raw humidity, press the button in air at 0 % RH, or clear it from code with `prefs.putFloat("hoff", 0)`. A press is ignored until the first valid reading arrives.
+The OLED shows `ZEROED` for 3 s after a press. The zero isn't remembered. Every reset (the EN button or power-up) starts again from raw humidity. A press is ignored until the first valid reading arrives.
 
 ## OLED display
 
@@ -82,7 +82,6 @@ A brand-new RTC, or one whose battery was removed, is still set automatically to
 
 ```
 DHT SD logger (dummy tester)
-Humidity zero offset: 0.0 %
 RTC: 2026-11-19 09:30:00
 Logging to /20261119_093000.csv
 09:30:00  T=24.0 C  H=55.0 %  rows=1

@@ -10,8 +10,8 @@
 //   3. Every 2 seconds reads temperature + humidity and writes one CSV line.
 //   4. Shows the time, temperature and humidity on the OLED.
 //   5. The zero button (GPIO35) zeroes the HUMIDITY only: the humidity at the moment of
-//      the press becomes the new 0 %. Temperature is never changed. The offset is saved in
-//      flash, so it survives a reboot.
+//      the press becomes the new 0 %. Temperature is never changed. The zero is NOT
+//      remembered: every reset (EN button or power-up) starts again from raw humidity.
 //
 // Libraries (Library Manager):
 //   - "Adafruit SSD1306" (pulls in Adafruit GFX + BusIO)
@@ -32,7 +32,6 @@
 #include <Adafruit_GFX.h>      // text drawing for the OLED
 #include <Adafruit_SSD1306.h>  // OLED driver
 #include <DHT.h>               // DHT11 / DHT22 driver
-#include <Preferences.h>       // small key/value store in flash, keeps the humidity zero across reboots
 #include <time.h>              // struct tm, mktime, gmtime_r
 #include "esp_timer.h"         // 64-bit microsecond timer (does not wrap like micros())
 
@@ -64,7 +63,6 @@ const bool     FORCE_SET_RTC    = false;   // true = set RTC to the compile time
 // ---- Hardware objects ----
 Adafruit_SSD1306 oled(128, 64, &Wire, -1);  // 128x64 OLED, no reset pin
 DHT dht(DHT_PIN, DHT_TYPE);
-Preferences prefs;
 
 // ---- Logging state ----
 File logFile;
@@ -72,7 +70,7 @@ char logPath[24];                // e.g. "/20261119_093000.csv"
 int64_t bootEpoch, bootTimerUs;  // RTC time at boot + matching esp_timer value
 uint32_t lastReadMs, rowCount;
 bool oledOk;                     // false if no OLED answered at boot
-float humOff;                    // humidity zero offset in % RH, saved in flash
+float humOff = 0;                // humidity zero offset in % RH, back to 0 on every reset
 float lastRawH = NAN;            // latest humidity straight from the sensor (before the offset)
 float lastT = NAN, lastH = NAN;  // latest temperature and zeroed humidity, shown on the OLED
 uint32_t zeroedMs;               // when the button was last pressed, to show "ZEROED" for 3 s
@@ -227,11 +225,6 @@ void setup() {
   pinMode(ZERO_BTN, INPUT);  // plain INPUT: GPIO35 has no internal pull-up, the external 10k does the job
   dht.begin();
 
-  // Saved humidity zero (0 if the button was never pressed)
-  prefs.begin("dht", false);
-  humOff = prefs.getFloat("hoff", 0);
-  Serial.printf("Humidity zero offset: %.1f %%\n", humOff);
-
   // OLED first, so later errors can be shown on it. Logging still works without it.
   Wire.begin(OLED_SDA, OLED_SCL);
   oledOk = oled.begin(SSD1306_SWITCHCAPVCC, OLED_ADDR);
@@ -334,7 +327,6 @@ void loop() {
     // Pressed: the latest raw humidity becomes the new zero. Temperature is left alone.
     if (btn == LOW && !isnan(lastRawH)) {
       humOff = lastRawH;
-      prefs.putFloat("hoff", humOff);           // survives reboot
       lastH = 0;                                // show 0 % straight away
       zeroedMs = ms;
       Serial.printf("Humidity zeroed. Offset: %.1f %%\n", humOff);
