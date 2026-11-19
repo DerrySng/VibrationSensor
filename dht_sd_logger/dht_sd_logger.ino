@@ -133,6 +133,8 @@ void rtcWaitForTick() {
   while (sec() == s0 && millis() - start < 1100) {}
 }
 
+bool rtcHalted = false;  // set by rtcRead: true only if the RTC itself says it stopped
+
 // Read date and time into t. Returns false if the clock is stopped or not connected.
 bool rtcRead(struct tm &t) {
   uint8_t r[7];                             // sec, min, hour, date, month, weekday, year
@@ -140,7 +142,8 @@ bool rtcRead(struct tm &t) {
   rtcWriteByte(0xBF, true);                 // clock burst read
   for (int i = 0; i < 7; i++) r[i] = rtcReadByte();
   rtcSelect(false);
-  if (r[0] & 0x80) return false;            // clock halted (new / battery lost)
+  rtcHalted = r[0] & 0x80;                  // clock halted (new RTC / backup battery lost)
+  if (rtcHalted) return false;
   t = {};
   t.tm_sec  = bcd2dec(r[0] & 0x7F);
   t.tm_min  = bcd2dec(r[1] & 0x7F);
@@ -243,6 +246,7 @@ void setup() {
   struct tm now;
   rtcWaitForTick();
   bool rtcOk = rtcRead(now);
+  for (int i = 0; i < 3 && !rtcOk && !rtcHalted; i++) { delay(10); rtcOk = rtcRead(now); }  // retry a bad read
   // Is this the first boot of a new upload? Compare this build's compile stamp with the one
   // saved in flash. Plain resets (RST button, power) keep the RTC time; only a new upload sets it.
   const char *thisBuild = __DATE__ " " __TIME__;
@@ -250,9 +254,9 @@ void setup() {
   prefs.begin("rtc", false);
   prefs.getString("build", lastBuild, sizeof(lastBuild));
   bool newBuild = strcmp(lastBuild, thisBuild) != 0;
-  if (!rtcOk || newBuild) {
+  if (newBuild || rtcHalted) {   // never overwrite the RTC just because one read was garbled
     // New upload, new RTC or flat battery: set it to the compile time, then read it back to check
-    Serial.println(newBuild ? "RTC: new upload, setting to compile time" : "RTC: not running, setting to compile time");
+    Serial.println(newBuild ? "RTC: new upload, setting to compile time" : "RTC: had stopped (check backup battery), setting to compile time");
     rtcWrite(compileTime());
     prefs.putString("build", thisBuild);
     rtcOk = rtcRead(now);
