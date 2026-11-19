@@ -5,6 +5,7 @@ A copy of the ADXL375 logger with the accelerometer swapped for a DHT11 temperat
 The sketch is `dht_sd_logger.ino` (in this folder). In the Arduino IDE pick the **ESP32 Dev Module** board. In Library Manager install:
 - **Adafruit SSD1306** (pulls in Adafruit GFX and BusIO)
 - **DHT sensor library** by Adafruit (pulls in Adafruit Unified Sensor)
+- **Ds1302** by Rafa Couto (for the RTC)
 
 Using a DHT22 instead? Change `#define DHT_TYPE DHT11` to `DHT22`.
 

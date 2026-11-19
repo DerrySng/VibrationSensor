@@ -1,7 +1,7 @@
 # ADXL375 → SD card logger (ESP32-DevKitC)
 
 The sketch is `adxl375_sd_logger/adxl375_sd_logger.ino`. Use the Arduino IDE with the ESP32 board package and select the **ESP32 Dev Module** board.
-In Library Manager, install **Adafruit SSD1306**. It pulls in Adafruit GFX and BusIO automatically.
+In Library Manager, install **Adafruit SSD1306**. It pulls in Adafruit GFX and BusIO automatically. Also install **Ds1302** by Rafa Couto for the RTC.
 
 ## Wiring (Prechin ESP32 base board)
 
