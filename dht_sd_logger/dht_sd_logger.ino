@@ -194,14 +194,14 @@ void drawOled(float tC, float hum) {
   oled.display();
 }
 
-// Fatal error: show the message on Serial and the OLED, then stop forever.
+// Fatal error: show the message on the OLED, then repeat it on Serial every 2 s forever
+// (so you still see it if the Serial Monitor was opened after the board booted).
 void halt(const char *msg) {
-  Serial.println(msg);
   if (oledOk) {
     oled.clearDisplay(); oled.setTextSize(1); oled.setCursor(0, 0);
     oled.println(msg); oled.display();
   }
-  while (true) delay(1000);
+  while (true) { Serial.println(msg); delay(2000); }
 }
 
 // ================= setup(): runs once at power-on =================
