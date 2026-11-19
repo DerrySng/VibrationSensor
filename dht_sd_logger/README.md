@@ -17,7 +17,7 @@ Using a DHT22 instead? Change `#define DHT_TYPE DHT11` to `DHT22`.
 | SD card | SCK / MISO / MOSI / CS | 18 / 19 / 23 / 4 | Base board TF slot, hardwired |
 | DS1302 RTC | CLK / DAT / RST(CE) | 18 / 23 / 25 | Shares SD SCK/MOSI, read once at boot (same as the ADXL375 logger) |
 | SSD1306 OLED | SDA / SCL | 21 / 22 | Jumper leads, not the board's OLED socket |
-| Mark button | one leg | GPIO35 | **Needs an external 10k pull-up**, see below |
+| Zero button (humidity) | one leg | GPIO35 | **Needs an external 10k pull-up**, see below |
 | | other leg | GND | |
 | 10k resistor | | GPIO35 to 3V3 | |
 
@@ -33,21 +33,23 @@ Yes, with one extra resistor. GPIO35 is input-only, which is fine for a button, 
 GND ─────────┘
 ```
 
-Not pressed: the 10k holds GPIO35 HIGH. Pressed: the button pulls it to GND (LOW). A 4.7k to 10k resistor works. If you'd rather not add a resistor, use a pin with an internal pull-up (GPIO32 or 33), change `MARK_BTN`, and change `pinMode(MARK_BTN, INPUT)` to `INPUT_PULLUP`.
+Not pressed: the 10k holds GPIO35 HIGH. Pressed: the button pulls it to GND (LOW). A 4.7k to 10k resistor works. If you'd rather not add a resistor, use a pin with an internal pull-up (GPIO32 or 33), change `ZERO_BTN`, and change `pinMode(ZERO_BTN, INPUT)` to `INPUT_PULLUP`.
 
 If you use one of the base board's KEY1 to KEY4 buttons instead of a loose one, they also go to GND with no pull-up, so you still need the 10k.
 
 ## What the button does
 
-The zero button doesn't make sense for a thermometer, so in this build it's a **mark** button. Press it and the next CSV line gets `mark = 1` (all others are 0), and the OLED shows `MARK` until that line is written. Use it to tag a moment, e.g. press it, then breathe on the sensor, and look for the humidity jump after the mark in the file. It also proves the button wiring works before you go back to the ADXL375 build.
+It's a **zero button for humidity only**. Press it and the humidity reading at that moment becomes the new 0 %. From then on, `humidity_pct` shows the change from that point, so it goes negative if the air gets drier. Temperature is never changed.
+
+The OLED shows `ZEROED` for 3 s after a press. The offset is saved in flash, so it's kept after a reboot. To go back to raw humidity, press the button in air at 0 % RH, or clear it from code with `prefs.putFloat("hoff", 0)`. A press is ignored until the first valid reading arrives.
 
 ## OLED display
 
 ```
-2026-11-19   MARK
+2026-11-19   ZEROED
 09:30:12
  24.0 C
- 55.0 %
+  0.0 %
 ```
 
 The date and clock update every second, temperature and humidity every 2 s. `DHT ERROR` means the sensor didn't answer.
@@ -57,9 +59,9 @@ The date and clock update every second, temperature and humidity every 2 s. `DHT
 One line every 2 s, flushed to the card each time, in a file named after the boot time (e.g. `/20261119_093000.csv`, or `/log_000.csv` without an RTC):
 
 ```
-epoch_s,datetime,temp_c,humidity_pct,mark
-1763544600,2026-11-19 09:30:00,24.0,55.0,0
-1763544602,2026-11-19 09:30:02,24.0,56.0,1
+epoch_s,datetime,temp_c,humidity_pct
+1763544600,2026-11-19 09:30:00,24.0,55.0
+1763544602,2026-11-19 09:30:02,24.0,0.0
 ```
 
 A failed sensor read is logged as `nan`, so you can still see the logger is running with the sensor unplugged.
@@ -72,11 +74,12 @@ Same as the ADXL375 logger: a new RTC is set to the compile time automatically. 
 
 ```
 DHT SD logger (dummy tester)
+Humidity zero offset: 0.0 %
 RTC: 2026-11-19 09:30:00
 Logging to /20261119_093000.csv
-09:30:00  T=24.0 C  H=55.0 %   rows=1
-Mark
-09:30:02  T=24.0 C  H=56.0 %  MARK rows=2
+09:30:00  T=24.0 C  H=55.0 %  rows=1
+Humidity zeroed. Offset: 55.0 %
+09:30:02  T=24.0 C  H=0.0 %  rows=2
 ```
 
 Errors you might see:

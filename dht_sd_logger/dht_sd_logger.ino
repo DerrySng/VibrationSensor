@@ -9,8 +9,9 @@
 //   2. Creates a new CSV file on the SD card.
 //   3. Every 2 seconds reads temperature + humidity and writes one CSV line.
 //   4. Shows the time, temperature and humidity on the OLED.
-//   5. The button (GPIO35) puts a "mark" on the next CSV line, so you can find a moment
-//      in the file later (e.g. "I breathed on the sensor here").
+//   5. The zero button (GPIO35) zeroes the HUMIDITY only: the humidity at the moment of
+//      the press becomes the new 0 %. Temperature is never changed. The offset is saved in
+//      flash, so it survives a reboot.
 //
 // Libraries (Library Manager):
 //   - "Adafruit SSD1306" (pulls in Adafruit GFX + BusIO)
@@ -18,7 +19,7 @@
 //
 // Each boot creates a new file named from the RTC, e.g. /20261119_093000.csv
 // (falls back to /log_000.csv ... if the RTC is missing).
-// Columns: epoch_s, datetime, temp_c, humidity_pct, mark
+// Columns: epoch_s, datetime, temp_c, humidity_pct (humidity_pct has the zero offset removed)
 // =====================================================================================
 
 #include <SPI.h>               // SPI bus (SD card)
@@ -27,6 +28,7 @@
 #include <Adafruit_GFX.h>      // text drawing for the OLED
 #include <Adafruit_SSD1306.h>  // OLED driver
 #include <DHT.h>               // DHT11 / DHT22 driver
+#include <Preferences.h>       // small key/value store in flash, keeps the humidity zero across reboots
 #include <time.h>              // struct tm, mktime, gmtime_r
 #include "esp_timer.h"         // 64-bit microsecond timer (does not wrap like micros())
 
@@ -45,9 +47,9 @@ const uint8_t OLED_ADDR = 0x3C;  // some modules use 0x3D
 // DHT data line. 27 is what the kit's own DHT11 example uses (free now the ADXL375 is gone).
 // The base board's DHT11 socket (J4) already has a 10k pull-up; jumper its signal pin to GPIO27.
 const int DHT_PIN   = 27;
-// Mark button on GPIO35. GPIO35 is INPUT-ONLY and has NO internal pull-up,
+// Zero button (humidity only) on GPIO35. GPIO35 is INPUT-ONLY and has NO internal pull-up,
 // so it needs an external 10k resistor from GPIO35 to 3V3. Button between GPIO35 and GND.
-const int MARK_BTN  = 35;
+const int ZERO_BTN  = 35;
 // ---- end of pins ----
 
 // ---- Settings ----
@@ -58,6 +60,7 @@ const bool     FORCE_SET_RTC    = false;   // true = set RTC to the compile time
 // ---- Hardware objects ----
 Adafruit_SSD1306 oled(128, 64, &Wire, -1);  // 128x64 OLED, no reset pin
 DHT dht(DHT_PIN, DHT_TYPE);
+Preferences prefs;
 
 // ---- Logging state ----
 File logFile;
@@ -65,8 +68,10 @@ char logPath[24];                // e.g. "/20261119_093000.csv"
 int64_t bootEpoch, bootTimerUs;  // RTC time at boot + matching esp_timer value
 uint32_t lastReadMs, rowCount;
 bool oledOk;                     // false if no OLED answered at boot
-bool markPending;                // true from a button press until the next CSV line is written
-float lastT = NAN, lastH = NAN;  // latest reading, shown on the OLED
+float humOff;                    // humidity zero offset in % RH, saved in flash
+float lastRawH = NAN;            // latest humidity straight from the sensor (before the offset)
+float lastT = NAN, lastH = NAN;  // latest temperature and zeroed humidity, shown on the OLED
+uint32_t zeroedMs;               // when the button was last pressed, to show "ZEROED" for 3 s
 
 // ================= DS1302 (3-wire, LSB first) =================
 // Only used in setup(), BEFORE the SD card takes over SCK/MOSI. With CE low the DS1302
@@ -170,7 +175,7 @@ time_t nowEpoch() { return (time_t)(bootEpoch + (esp_timer_get_time() - bootTime
 //   line 2 (big): clock
 //   line 3 (big): temperature
 //   line 4 (big): humidity
-//   bottom: "MARK" while a button press waits to be logged
+//   top right: "ZEROED" for 3 s after the zero button is pressed
 void drawOled(float tC, float hum) {
   if (!oledOk) return;
   time_t tt = nowEpoch();
@@ -179,7 +184,8 @@ void drawOled(float tC, float hum) {
   oled.clearDisplay();
   oled.setTextSize(1);
   oled.setCursor(0, 0);
-  oled.printf("%04d-%02d-%02d   %s", t.tm_year + 1900, t.tm_mon + 1, t.tm_mday, markPending ? "MARK" : "");
+  oled.printf("%04d-%02d-%02d   %s", t.tm_year + 1900, t.tm_mon + 1, t.tm_mday,
+              (zeroedMs && millis() - zeroedMs < 3000) ? "ZEROED" : "");
   oled.setTextSize(2);
   oled.setCursor(0, 12);
   oled.printf("%02d:%02d:%02d\n", t.tm_hour, t.tm_min, t.tm_sec);
@@ -205,8 +211,13 @@ void setup() {
   delay(500);
   Serial.println("\nDHT SD logger (dummy tester)");
 
-  pinMode(MARK_BTN, INPUT);  // plain INPUT: GPIO35 has no internal pull-up, the external 10k does the job
+  pinMode(ZERO_BTN, INPUT);  // plain INPUT: GPIO35 has no internal pull-up, the external 10k does the job
   dht.begin();
+
+  // Saved humidity zero (0 if the button was never pressed)
+  prefs.begin("dht", false);
+  humOff = prefs.getFloat("hoff", 0);
+  Serial.printf("Humidity zero offset: %.1f %%\n", humOff);
 
   // OLED first, so later errors can be shown on it. Logging still works without it.
   Wire.begin(OLED_SDA, OLED_SCL);
@@ -253,7 +264,7 @@ void setup() {
   }
   logFile = SD.open(logPath, FILE_WRITE);
   if (!logFile) halt("ERROR: could not create log file.");
-  logFile.println("epoch_s,datetime,temp_c,humidity_pct,mark");  // CSV header
+  logFile.println("epoch_s,datetime,temp_c,humidity_pct");  // CSV header
   logFile.flush();
   Serial.printf("Logging to %s\n", logPath);
 
@@ -267,11 +278,20 @@ void loop() {
   // Button: LOW = pressed (the external pull-up holds it HIGH otherwise). 50 ms debounce.
   static bool lastBtn = HIGH;
   static uint32_t lastBtnMs;
-  bool btn = digitalRead(MARK_BTN);
+  bool btn = digitalRead(ZERO_BTN);
   if (btn != lastBtn && ms - lastBtnMs > 50) {
     lastBtn = btn;
     lastBtnMs = ms;
-    if (btn == LOW) { markPending = true; Serial.println("Mark"); }
+    // Pressed: the latest raw humidity becomes the new zero. Temperature is left alone.
+    if (btn == LOW && !isnan(lastRawH)) {
+      humOff = lastRawH;
+      prefs.putFloat("hoff", humOff);           // survives reboot
+      lastH = 0;                                // show 0 % straight away
+      zeroedMs = ms;
+      Serial.printf("Humidity zeroed. Offset: %.1f %%\n", humOff);
+    } else if (btn == LOW) {
+      Serial.println("Zero ignored: no valid humidity reading yet.");
+    }
   }
 
   // Redraw the OLED twice a second so the clock ticks every second (the DHT is only read every 2 s)
@@ -284,22 +304,23 @@ void loop() {
   float tC  = dht.readTemperature();  // deg C, NAN if the sensor did not answer
   float hum = dht.readHumidity();     // % RH, NAN if the sensor did not answer
   if (isnan(hum)) tC = NAN;           // treat a half-failed read as a failed read
+  lastRawH = hum;
+  hum -= humOff;                      // zeroed humidity (NAN stays NAN)
 
-  // One CSV line: "epoch,YYYY-MM-DD HH:MM:SS,temp,humidity,mark". A failed read logs "nan"
+  // One CSV line: "epoch,YYYY-MM-DD HH:MM:SS,temp,humidity". A failed read logs "nan"
   // so you can still see the logger is running while the sensor is unplugged.
   time_t tt = nowEpoch();
   struct tm t;
   gmtime_r(&tt, &t);
-  logFile.printf("%ld,%04d-%02d-%02d %02d:%02d:%02d,%.1f,%.1f,%d\n", (long)tt,
+  logFile.printf("%ld,%04d-%02d-%02d %02d:%02d:%02d,%.1f,%.1f\n", (long)tt,
                  t.tm_year + 1900, t.tm_mon + 1, t.tm_mday, t.tm_hour, t.tm_min, t.tm_sec,
-                 tC, hum, markPending ? 1 : 0);
+                 tC, hum);
   logFile.flush();                    // only one line every 2 s, so flush each time: a power cut loses nothing
   rowCount++;
 
-  Serial.printf("%02d:%02d:%02d  T=%.1f C  H=%.1f %%  %s rows=%lu\n", t.tm_hour, t.tm_min, t.tm_sec,
-                tC, hum, markPending ? "MARK" : "", (unsigned long)rowCount);
+  Serial.printf("%02d:%02d:%02d  T=%.1f C  H=%.1f %%  rows=%lu\n", t.tm_hour, t.tm_min, t.tm_sec,
+                tC, hum, (unsigned long)rowCount);
   if (isnan(tC)) Serial.println("WARNING: DHT read failed. Check the data wire, 3V3/GND and the DHT_TYPE setting.");
 
-  markPending = false;
   lastT = tC; lastH = hum;
 }
