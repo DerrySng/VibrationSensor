@@ -11,7 +11,7 @@
 //   4. Shows the time, temperature and humidity on the OLED.
 //   5. The zero button (GPIO35) zeroes the HUMIDITY only: the humidity at the moment of
 //      the press becomes the new 0 %. Temperature is never changed. The zero is NOT
-//      remembered: every reset (EN button or power-up) starts again from raw humidity.
+//      remembered: every reset (RST button or power-up) starts again from raw humidity.
 //
 // Libraries (Library Manager):
 //   - "Adafruit SSD1306" (pulls in Adafruit GFX + BusIO)
@@ -244,7 +244,7 @@ void setup() {
   rtcWaitForTick();
   bool rtcOk = rtcRead(now);
   // Is this the first boot of a new upload? Compare this build's compile stamp with the one
-  // saved in flash. Plain resets (EN, power) keep the RTC time; only a new upload sets it.
+  // saved in flash. Plain resets (RST button, power) keep the RTC time; only a new upload sets it.
   const char *thisBuild = __DATE__ " " __TIME__;
   char lastBuild[24] = "";
   prefs.begin("rtc", false);

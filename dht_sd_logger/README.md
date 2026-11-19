@@ -41,7 +41,7 @@ If you use one of the base board's KEY1 to KEY4 buttons instead of a loose one, 
 
 It's a **zero button for humidity only**. Press it and the humidity reading at that moment becomes the new 0 %. From then on, `humidity_pct` shows the change from that point, so it goes negative if the air gets drier. Temperature is never changed.
 
-The OLED shows `ZEROED` for 3 s after a press. The zero isn't remembered. Every reset (the EN button or power-up) starts again from raw humidity. A press is ignored until the first valid reading arrives.
+The OLED shows `ZEROED` for 3 s after a press. The zero isn't remembered. Every reset (the RST button or power-up) starts again from raw humidity. A press is ignored until the first valid reading arrives.
 
 ## OLED display
 
@@ -76,7 +76,7 @@ The sketch writes the time to the RTC and restarts, and logging continues in a n
 
 At each boot the sketch waits for the RTC's seconds to tick over before reading it, so the log starts on the exact second. After setting, expect a drift of about 1 to 2 s a day from the DS1302 crystal. Re-set it every week or two if you need it to stay within a second.
 
-**Automatic set on upload:** the first boot after every new upload sets the RTC to the compile time plus `UPLOAD_DELAY_S` (30 s by default, to cover compiling and uploading). Pressing EN or power-cycling does *not* reset the clock. Only a new upload does. That gets you within a few seconds. To tune it, compare the OLED with time.is after an upload and adjust `UPLOAD_DELAY_S` by the difference. For exact seconds, use the Serial Monitor method above.
+**Automatic set on upload:** the first boot after every new upload sets the RTC to the compile time plus `UPLOAD_DELAY_S` (30 s by default, to cover compiling and uploading). Pressing RST or power-cycling does *not* reset the clock. Only a new upload does. That gets you within a few seconds. To tune it, compare the OLED with time.is after an upload and adjust `UPLOAD_DELAY_S` by the difference. For exact seconds, use the Serial Monitor method above.
 
 A brand-new RTC, or one whose battery was removed, is also set to the compile time automatically.
 
