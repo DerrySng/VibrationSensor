@@ -32,6 +32,7 @@
 #include <Adafruit_GFX.h>      // text drawing for the OLED
 #include <Adafruit_SSD1306.h>  // OLED driver
 #include <DHT.h>               // DHT11 / DHT22 driver
+#include <Preferences.h>       // small store in flash: remembers which build last set the RTC
 #include <time.h>              // struct tm, mktime, gmtime_r
 #include "esp_timer.h"         // 64-bit microsecond timer (does not wrap like micros())
 
@@ -58,11 +59,14 @@ const int ZERO_BTN  = 35;
 // ---- Settings ----
 #define DHT_TYPE DHT11                     // change to DHT22 if you swap in a DHT22 / AM2302
 const uint32_t READ_INTERVAL_MS = 2000;    // DHT11 allows 1 read/s, DHT22 1 read per 2 s: 2 s suits both
-const bool     FORCE_SET_RTC    = false;   // true = set RTC to the compile time on boot (then set back to false and re-upload)
+// Every NEW upload sets the RTC to the compile time + this many seconds (compile + upload time).
+// To tune it: after an upload, compare the OLED with time.is and add the difference.
+const int      UPLOAD_DELAY_S   = 30;
 
 // ---- Hardware objects ----
 Adafruit_SSD1306 oled(128, 64, &Wire, -1);  // 128x64 OLED, no reset pin
 DHT dht(DHT_PIN, DHT_TYPE);
+Preferences prefs;
 
 // ---- Logging state ----
 File logFile;
@@ -164,8 +168,8 @@ void rtcWrite(const struct tm &t) {
   rtcSelect(false);
 }
 
-// The time this sketch was compiled (from the __DATE__ and __TIME__ macros), used to
-// set a new RTC. It is your PC's local time, so the RTC ends up in your local time too.
+// The time this sketch was compiled (from the __DATE__ and __TIME__ macros) plus
+// UPLOAD_DELAY_S, used to set the RTC after each new upload. It is your PC's local time, so the RTC ends up in your local time too.
 struct tm compileTime() {
   struct tm t = {};
   char mon[4];
@@ -174,7 +178,8 @@ struct tm compileTime() {
   // Month name -> 0-11 by its position in this string
   t.tm_mon = (strstr("JanFebMarAprMayJunJulAugSepOctNovDec", mon) - "JanFebMarAprMayJunJulAugSepOctNovDec") / 3;
   t.tm_year -= 1900;
-  mktime(&t);  // fills in tm_wday
+  t.tm_sec += UPLOAD_DELAY_S;
+  mktime(&t);  // carries the extra seconds into min/hour/day and fills in tm_wday
   return t;
 }
 
@@ -238,10 +243,18 @@ void setup() {
   struct tm now;
   rtcWaitForTick();
   bool rtcOk = rtcRead(now);
-  if (!rtcOk || FORCE_SET_RTC) {
-    // New RTC or flat battery: start it at the compile time, then read it back to check
-    Serial.println(rtcOk ? "RTC: forced set to compile time" : "RTC: not running, setting to compile time");
+  // Is this the first boot of a new upload? Compare this build's compile stamp with the one
+  // saved in flash. Plain resets (EN, power) keep the RTC time; only a new upload sets it.
+  const char *thisBuild = __DATE__ " " __TIME__;
+  char lastBuild[24] = "";
+  prefs.begin("rtc", false);
+  prefs.getString("build", lastBuild, sizeof(lastBuild));
+  bool newBuild = strcmp(lastBuild, thisBuild) != 0;
+  if (!rtcOk || newBuild) {
+    // New upload, new RTC or flat battery: set it to the compile time, then read it back to check
+    Serial.println(newBuild ? "RTC: new upload, setting to compile time" : "RTC: not running, setting to compile time");
     rtcWrite(compileTime());
+    prefs.putString("build", thisBuild);
     rtcOk = rtcRead(now);
   }
   // Remember the RTC time and the ESP32 timer at the same moment; the clock counts on from here.
