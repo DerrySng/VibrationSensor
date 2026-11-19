@@ -41,7 +41,7 @@ If you use one of the base board's KEY1 to KEY4 buttons instead of a loose one, 
 
 It's a **zero button for humidity only**. Press it and the humidity reading at that moment becomes the new 0 %. From then on, `humidity_pct` shows the change from that point, so it goes negative if the air gets drier. Temperature is never changed.
 
-The OLED shows `ZEROED` for 3 s after a press. The offset is saved in flash, so it's kept after a reboot. To go back to raw humidity, press the button in air at 0 % RH, or clear it from code with `prefs.putFloat("hoff", 0)`. A press is ignored until the first valid reading arrives.
+The OLED shows `ZEROED` for 3 s after a press. The zero isn't remembered. Every reset (the RST button or power-up) starts again from raw humidity. A press is ignored until the first valid reading arrives.
 
 ## OLED display
 
@@ -76,13 +76,14 @@ The sketch writes the time to the RTC and restarts, and logging continues in a n
 
 At each boot the sketch waits for the RTC's seconds to tick over before reading it, so the log starts on the exact second. After setting, expect a drift of about 1 to 2 s a day from the DS1302 crystal. Re-set it every week or two if you need it to stay within a second.
 
-A brand-new RTC, or one whose battery was removed, is still set automatically to the compile time, which is usually 30 to 60 s behind. Correct it with the steps above. `FORCE_SET_RTC` still works as before.
+**Automatic set on upload:** the first boot after every new upload sets the RTC to the compile time, as it is (no correction added). Pressing RST or power-cycling does *not* reset the clock. Only a new upload does. The clock ends up behind by however long compiling and uploading took, usually 30 to 60 s. For exact seconds, use the Serial Monitor method above.
+
+A brand-new RTC, or one whose battery was removed, is also set to the compile time automatically.
 
 ## Expected Serial output (115200 baud)
 
 ```
 DHT SD logger (dummy tester)
-Humidity zero offset: 0.0 %
 RTC: 2026-11-19 09:30:00
 Logging to /20261119_093000.csv
 09:30:00  T=24.0 C  H=55.0 %  rows=1

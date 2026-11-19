@@ -10,8 +10,8 @@
 //   3. Every 2 seconds reads temperature + humidity and writes one CSV line.
 //   4. Shows the time, temperature and humidity on the OLED.
 //   5. The zero button (GPIO35) zeroes the HUMIDITY only: the humidity at the moment of
-//      the press becomes the new 0 %. Temperature is never changed. The offset is saved in
-//      flash, so it survives a reboot.
+//      the press becomes the new 0 %. Temperature is never changed. The zero is NOT
+//      remembered: every reset (RST button or power-up) starts again from raw humidity.
 //
 // Libraries (Library Manager):
 //   - "Adafruit SSD1306" (pulls in Adafruit GFX + BusIO)
@@ -32,7 +32,7 @@
 #include <Adafruit_GFX.h>      // text drawing for the OLED
 #include <Adafruit_SSD1306.h>  // OLED driver
 #include <DHT.h>               // DHT11 / DHT22 driver
-#include <Preferences.h>       // small key/value store in flash, keeps the humidity zero across reboots
+#include <Preferences.h>       // small store in flash: remembers which build last set the RTC
 #include <time.h>              // struct tm, mktime, gmtime_r
 #include "esp_timer.h"         // 64-bit microsecond timer (does not wrap like micros())
 
@@ -59,7 +59,6 @@ const int ZERO_BTN  = 35;
 // ---- Settings ----
 #define DHT_TYPE DHT11                     // change to DHT22 if you swap in a DHT22 / AM2302
 const uint32_t READ_INTERVAL_MS = 2000;    // DHT11 allows 1 read/s, DHT22 1 read per 2 s: 2 s suits both
-const bool     FORCE_SET_RTC    = false;   // true = set RTC to the compile time on boot (then set back to false and re-upload)
 
 // ---- Hardware objects ----
 Adafruit_SSD1306 oled(128, 64, &Wire, -1);  // 128x64 OLED, no reset pin
@@ -72,7 +71,7 @@ char logPath[24];                // e.g. "/20261119_093000.csv"
 int64_t bootEpoch, bootTimerUs;  // RTC time at boot + matching esp_timer value
 uint32_t lastReadMs, rowCount;
 bool oledOk;                     // false if no OLED answered at boot
-float humOff;                    // humidity zero offset in % RH, saved in flash
+float humOff = 0;                // humidity zero offset in % RH, back to 0 on every reset
 float lastRawH = NAN;            // latest humidity straight from the sensor (before the offset)
 float lastT = NAN, lastH = NAN;  // latest temperature and zeroed humidity, shown on the OLED
 uint32_t zeroedMs;               // when the button was last pressed, to show "ZEROED" for 3 s
@@ -167,7 +166,7 @@ void rtcWrite(const struct tm &t) {
 }
 
 // The time this sketch was compiled (from the __DATE__ and __TIME__ macros), used to
-// set a new RTC. It is your PC's local time, so the RTC ends up in your local time too.
+// set the RTC after each new upload. It is your PC's local time, so the RTC ends up in your local time too.
 struct tm compileTime() {
   struct tm t = {};
   char mon[4];
@@ -227,11 +226,6 @@ void setup() {
   pinMode(ZERO_BTN, INPUT);  // plain INPUT: GPIO35 has no internal pull-up, the external 10k does the job
   dht.begin();
 
-  // Saved humidity zero (0 if the button was never pressed)
-  prefs.begin("dht", false);
-  humOff = prefs.getFloat("hoff", 0);
-  Serial.printf("Humidity zero offset: %.1f %%\n", humOff);
-
   // OLED first, so later errors can be shown on it. Logging still works without it.
   Wire.begin(OLED_SDA, OLED_SCL);
   oledOk = oled.begin(SSD1306_SWITCHCAPVCC, OLED_ADDR);
@@ -245,10 +239,18 @@ void setup() {
   struct tm now;
   rtcWaitForTick();
   bool rtcOk = rtcRead(now);
-  if (!rtcOk || FORCE_SET_RTC) {
-    // New RTC or flat battery: start it at the compile time, then read it back to check
-    Serial.println(rtcOk ? "RTC: forced set to compile time" : "RTC: not running, setting to compile time");
+  // Is this the first boot of a new upload? Compare this build's compile stamp with the one
+  // saved in flash. Plain resets (RST button, power) keep the RTC time; only a new upload sets it.
+  const char *thisBuild = __DATE__ " " __TIME__;
+  char lastBuild[24] = "";
+  prefs.begin("rtc", false);
+  prefs.getString("build", lastBuild, sizeof(lastBuild));
+  bool newBuild = strcmp(lastBuild, thisBuild) != 0;
+  if (!rtcOk || newBuild) {
+    // New upload, new RTC or flat battery: set it to the compile time, then read it back to check
+    Serial.println(newBuild ? "RTC: new upload, setting to compile time" : "RTC: not running, setting to compile time");
     rtcWrite(compileTime());
+    prefs.putString("build", thisBuild);
     rtcOk = rtcRead(now);
   }
   // Remember the RTC time and the ESP32 timer at the same moment; the clock counts on from here.
@@ -334,7 +336,6 @@ void loop() {
     // Pressed: the latest raw humidity becomes the new zero. Temperature is left alone.
     if (btn == LOW && !isnan(lastRawH)) {
       humOff = lastRawH;
-      prefs.putFloat("hoff", humOff);           // survives reboot
       lastH = 0;                                // show 0 % straight away
       zeroedMs = ms;
       Serial.printf("Humidity zeroed. Offset: %.1f %%\n", humOff);
