@@ -47,7 +47,8 @@ If you'd rather keep the buses separate, connect the DS1302 to any 3 free GPIOs 
 
 The DS1302's DAT (I/O) wire must go to **GPIO23**, not GPIO19 as in the kit's own example.
 
-- **Automatic on upload:** the first boot after every new upload sets the RTC to the compile time, with nothing added, so it ends up behind by however long compiling and uploading took. Pressing RST or power-cycling does *not* change the clock. Only a new upload does. A brand-new RTC, or one whose battery was removed, is also set to the compile time.
+- **Automatic from WiFi/NTP (recommended):** fill in `WIFI_SSID` and `WIFI_PASS` near the top of the sketch. At every boot it joins WiFi (up to 10 s), gets the time from NTP (up to 8 s), and writes it to the RTC at the start of a second, in Singapore time (`TZ_OFFSET_S = 8 * 3600`). Then it turns WiFi **off** before logging starts, so the radio can't disturb 1600 Hz sampling. With no WiFi in range, or the SSID left empty, it skips this and uses the RTC as below, so the logger still works in the field. Don't push your real WiFi password to GitHub.
+- **Automatic on upload (when NTP didn't run):** the first boot after every new upload sets the RTC to the compile time, with nothing added, so it ends up behind by however long compiling and uploading took. Pressing RST or power-cycling does *not* change the clock. Only a new upload does. A brand-new RTC, or one whose battery was removed, is also set to the compile time.
 - **Exact to the second:** open Serial Monitor at 115200 with the line ending set to **Newline**. Type a time a few seconds ahead of a reference clock (e.g. time.is) as `YYYY-MM-DD HH:MM:SS`, and press Enter exactly when the reference clock reaches that second. The sketch sets the RTC and restarts, and logging continues in a new file. A wrong format prints `Time not understood` and changes nothing.
 - At each boot the sketch waits for the RTC's seconds to tick over before reading it, so the time starts on the exact second. Expect a drift of about 1 to 2 s a day after setting.
 
@@ -67,9 +68,9 @@ The top right shows `RAW` (no zero), `ZEROING` (averaging after a press) or `ZER
 
 ## Zero button (toggle)
 
-- **First press:** hold the sensor still for 100 ms. The sketch averages 160 readings and uses that average as the new zero for X, Y and Z. That also removes the 1 g of gravity on whichever axis points up.
+- **First press:** hold the sensor still for 100 ms. The sketch averages 160 Z readings and uses that as the new zero for **Z only**, so Z goes from about 1 g (gravity) to 0 g. X and Y are never offset.
 - **Next press:** turns the zero off and goes back to raw values. Each press after that toggles again.
-- The zero isn't remembered. Every reset (RST or power-up) starts with raw values. Toggling in the middle of a run shifts all the values that follow in that file.
+- The zero isn't remembered. Every reset (RST or power-up) starts with raw values. While the zero is off, Z shows the raw reading, about 1 g with the sensor flat. Toggling in the middle of a run shifts all the values that follow in that file.
 
 ## Output
 
@@ -87,11 +88,13 @@ date,time,us,x_g,y_g,z_g
 
 ```
 ADXL375 SD logger
+WiFi: connecting to MyWiFi...
+NTP: RTC set to 2026-11-19 09:29:58
 RTC: 2026-11-19 09:30:00
 ADXL375 DEVID: 0xE5
 Logging to /20261119_093000.csv
 X=   0.05 g  Y=  -0.10 g  Z=   1.03 g  samples=812
-Zero ON. Offsets (counts): 1.2 -2.0 20.6
+Zero ON. Z offset: 20.6 counts (1.01 g)
 X=   0.00 g  Y=   0.05 g  Z=   0.00 g  samples=1612
 Zero OFF (raw values).
 ```
