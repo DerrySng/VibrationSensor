@@ -16,7 +16,7 @@ Logging only runs while **ZEROED**. Every power-on or RST starts in **RAW**: the
 
 ## CSV
 
-Each file is named from the RTC at the moment logging starts, e.g. `/20261120_104206.csv`. The date only appears in the file name. A long run also starts a new file at the top of every hour (`/20261120_110000.csv`), so each file stays inside one date and well under FAT32's 4 GB limit. If the name already exists, `_1`, `_2` ... is added, so nothing is overwritten.
+Each file is named from the RTC at the moment logging starts, e.g. `/20261120_104206.csv`. The date only appears in the file name. Each ZEROED session is one file. FAT32 can't hold a file over 4 GB (about 17 h of logging), so only if a session gets that long does a new file start automatically. A run past midnight stays in one file, so the date in the name is the date logging started. If the name already exists, `_1`, `_2` ... is added, so nothing is overwritten.
 
 ```
 time,us,x_g,y_g,z_g,note
@@ -48,7 +48,7 @@ Values are the latest sample read from the sensor, not from the SD card. When so
 |---|---|---|
 | `ADXL375 / NOT FOUND / check wiring` | sensor not answering | logs nothing, retries every 1 s, starts a new file when it is back (if ZEROED) |
 | `NO SD CARD / insert FAT32 card` | no card (or not FAT32) | retries every 2 s; logging starts once a card works and you are ZEROED |
-| `SD ERROR / logging stopped / check card` | card pulled or a write failed | retries every 2 s, continues the same file (new file if the hour changed) with an `SD gap` row |
+| `SD ERROR / logging stopped / check card` | card pulled or a write failed | retries every 2 s, continues the same file with an `SD gap` row |
 | `SD FULL / swap card, / then press RST` | less than 1 MB free | stops logging until RST |
 
 RTC problems, dropped samples and a missing OLED are only reported on Serial (115200).

@@ -9,7 +9,8 @@
 //     subtract them, open a new CSV file and log. Next press: close the file, back to RAW.
 //     Each press into ZEROED repeats this with a fresh average and a new file.
 //   * Files are named from the RTC (the date is only in the name), e.g. /20261120_104205.csv.
-//     A long run also starts a new file at the top of every hour (/20261120_110000.csv).
+//     One file per ZEROED session. Only if it nears FAT32's 4 GB limit (~17 h) does a new
+//     file start, so data is never lost to the limit.
 //     Columns: time (hh:mm:ss), us (0-999999 within that second), x_g, y_g, z_g (3 decimals), note
 //   * OLED every 0.5 s: date, time, RAW / ZEROING / LOGGING, then the latest X, Y, Z.
 //     Errors replace X/Y/Z so nobody thinks it is logging when it is not:
@@ -72,6 +73,7 @@ const uint32_t SD_RETRY_MS      = 2000;   // how often a missing / failed card i
 const uint32_t ADXL_RETRY_MS    = 1000;   // how often a missing sensor is tried again
 const uint32_t ADXL_CHECK_MS    = 500;    // how often a working sensor's ID is checked
 const uint64_t SD_MIN_FREE      = 1048576; // below 1 MB free the card counts as full
+const uint32_t MAX_FILE_BYTES   = 4000000000UL; // FAT32 can't hold a file over 4 GiB: start a new one first
 const int      ZERO_SAMPLES     = 1600;   // 1 s average for the zero
 const int      BUFFER_SAMPLES   = 4000;   // RAM buffer: ~2.5 s of samples if the card stalls
 const char    *CSV_HEADER       = "time,us,x_g,y_g,z_g,note\n";
@@ -265,8 +267,8 @@ static size_t wlen;
 static uint32_t wrows;         // sample rows in wbuf (lost if the card fails)
 static int64_t wfirstUs;       // time of the first of them
 static bool mounted;           // card mounted and not full
-static bool resume;            // after an SD error: continue the same file if still the same hour
-static int64_t fileHour = -1;  // hour (epoch / 3600) of the open file
+static bool resume;            // after an SD error: continue the same file
+static uint32_t fileBytes;     // size of the open file
 static uint32_t gapN;          // samples lost while the card was unusable
 static int64_t gapUs;          // time of the first of them
 
@@ -275,6 +277,7 @@ void loseRows(uint32_t n, int64_t eUs) { if (!gapN) gapUs = eUs; gapN += n; }
 bool writeOut() {
   if (!wlen) return true;
   bool ok = logFile.write((const uint8_t *)wbuf, wlen) == wlen;
+  fileBytes += wlen;
   wlen = 0; wrows = 0;
   return ok;
 }
@@ -292,12 +295,12 @@ void sdFailed() {
   Serial.println("SD ERROR: write failed, retrying");
 }
 
-// Open the file for the hour of eUs: the same file again after an SD error, else a new one.
+// Open the same file again after an SD error, else a new one named from eUs.
 bool openLog(int64_t eUs) {
   time_t sec = eUs / 1000000;
-  int64_t hour = sec / 3600;
-  if (resume && hour == fileHour) {
+  if (resume) {
     logFile = SD.open(logPath, FILE_APPEND);
+    if (logFile) fileBytes = logFile.size();
   } else {
     struct tm tm;
     gmtime_r(&sec, &tm);
@@ -308,16 +311,16 @@ bool openLog(int64_t eUs) {
     for (int i = 1; SD.exists(logPath) && i < 100; i++) snprintf(logPath, sizeof(logPath), "%s_%d.csv", base, i);
     logFile = SD.open(logPath, FILE_WRITE);
     if (logFile && logFile.print(CSV_HEADER) != strlen(CSV_HEADER)) logFile.close();
+    fileBytes = strlen(CSV_HEADER);
   }
   resume = false;
   if (!logFile) return false;
-  fileHour = hour;
   sdState = SD_OK;
   Serial.printf("Logging to %s\n", logPath);
   return true;
 }
 
-// Close the open file normally (hourly rollover, sensor lost, restart).
+// Close the open file normally (back to RAW, size limit, sensor lost, restart).
 void closeLog() {
   if (!logFile) return;
   if (writeOut()) logFile.close();
@@ -353,7 +356,7 @@ void sdTask(void *) {
     if (got) {
       int64_t e = epochUs(s.tUs);
       if (sdState == SD_FULL) continue;                      // nothing written until RST
-      if (mounted && logFile && e / 1000000 / 3600 != fileHour) closeLog();  // new hour
+      if (mounted && logFile && fileBytes > MAX_FILE_BYTES) closeLog();  // near 4 GB: new file
       if (mounted && !logFile && !openLog(e)) sdFailed();
       if (!logFile) { loseRows(1 + s.drop, e); continue; }
 
