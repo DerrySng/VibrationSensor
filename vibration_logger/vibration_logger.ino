@@ -4,19 +4,20 @@
 //   * ADXL375 sampled at 1600 Hz through its 32-sample FIFO (core 1).
 //   * Samples wait in a RAM buffer and are written to the SD card by a task on core 0,
 //     so a slow card never stops sampling.
-//   * New CSV file at every power-on and at the top of every hour, named from the RTC,
-//     e.g. /20261120_104205.csv then /20261120_110000.csv.
-//     Columns: date (dd/mm/yy), time (hh:mm:ss), us (0-999999 within that second),
-//              x_g, y_g, z_g (3 decimals), mode (R raw, Z zeroed, E error row), note
-//   * KEY1 (GPIO32) toggles zero on all three axes: first press averages 100 ms and
-//     subtracts it, next press goes back to raw. Every power-on / RST starts RAW.
-//   * OLED every 0.5 s: date, time, RAW/ZEROED, then the latest X, Y, Z from the sensor.
+//   * Logging only runs while ZEROED. Power-on / RST starts RAW: the OLED shows live data
+//     but nothing is written. KEY1 (GPIO32) press: average 1600 samples (1 s) of X, Y, Z,
+//     subtract them, open a new CSV file and log. Next press: close the file, back to RAW.
+//     Each press into ZEROED repeats this with a fresh average and a new file.
+//   * Files are named from the RTC (the date is only in the name), e.g. /20261120_104205.csv.
+//     A long run also starts a new file at the top of every hour (/20261120_110000.csv).
+//     Columns: time (hh:mm:ss), us (0-999999 within that second), x_g, y_g, z_g (3 decimals), note
+//   * OLED every 0.5 s: date, time, RAW / ZEROING / LOGGING, then the latest X, Y, Z.
 //     Errors replace X/Y/Z so nobody thinks it is logging when it is not:
 //       ADXL375 not found  -> nothing logged, retried every 1 s, new file when it is back
 //       NO SD CARD         -> retried every 2 s, logging starts when a card is inserted
 //       SD ERROR           -> retried every 2 s, same file continued with a gap row
 //       SD FULL            -> logging stops until a new card + RST
-//   * Error rows in the CSV: "E,SD gap N samples" and "E,dropped N samples".
+//   * Error rows in the CSV have empty x/y/z and a note: "SD gap N samples", "dropped N samples".
 //   * Every new upload sets the RTC to the compile time. For the exact second send
 //     "YYYY-MM-DD HH:MM:SS" on Serial (115200, Newline), or use the RTC Sync app.
 //     RTC problems and a missing OLED are reported on Serial only.
@@ -71,9 +72,9 @@ const uint32_t SD_RETRY_MS      = 2000;   // how often a missing / failed card i
 const uint32_t ADXL_RETRY_MS    = 1000;   // how often a missing sensor is tried again
 const uint32_t ADXL_CHECK_MS    = 500;    // how often a working sensor's ID is checked
 const uint64_t SD_MIN_FREE      = 1048576; // below 1 MB free the card counts as full
-const int      ZERO_SAMPLES     = 160;    // 100 ms average for the zero
+const int      ZERO_SAMPLES     = 1600;   // 1 s average for the zero
 const int      BUFFER_SAMPLES   = 4000;   // RAM buffer: ~2.5 s of samples if the card stalls
-const char    *CSV_HEADER       = "date,time,us,x_g,y_g,z_g,mode,note\n";
+const char    *CSV_HEADER       = "time,us,x_g,y_g,z_g,note\n";
 
 // ---- ADXL375 registers ----
 const uint8_t REG_DEVID = 0x00, REG_BW_RATE = 0x2C, REG_POWER_CTL = 0x2D,
@@ -86,12 +87,13 @@ Preferences prefs;
 
 // One sample in raw counts (49 mg each), zero already removed.
 // drop = samples lost just before this one because the RAM buffer was full.
-struct Sample { int64_t tUs; int16_t x, y, z; char mode; uint32_t drop; };
+struct Sample { int64_t tUs; int16_t x, y, z; uint32_t drop; };
 QueueHandle_t sampleQ;
 
 enum { SD_NONE, SD_OK, SD_FAIL, SD_FULL };
 volatile uint8_t sdState = SD_NONE;       // set by sdTask, shown by the OLED
 volatile bool adxlOk = false;             // set by loop(), read by sdTask and the OLED
+volatile bool logging = false;            // true while ZEROED: loop() queues samples, sdTask writes them
 volatile bool stopLogging = false, logClosed = false;  // clean close before a restart
 volatile uint32_t lostSamples, fifoFull, sampleCount;   // Serial counters
 int64_t bootEpoch, bootTimerUs;           // RTC time at boot + matching esp_timer value
@@ -105,7 +107,7 @@ int32_t sumX, sumY, sumZ;
 // Latest sample for the OLED, always copied as one set under dispMux
 portMUX_TYPE dispMux = portMUX_INITIALIZER_UNLOCKED;
 int16_t dispX, dispY, dispZ;
-bool dispZeroed;
+uint8_t dispMode;                         // 0 RAW, 1 ZEROING, 2 LOGGING
 bool oledOk;
 
 // ================= ADXL375 =================
@@ -234,7 +236,7 @@ struct tm compileTime() {
 // ================= CSV text =================
 int64_t epochUs(int64_t tUs) { return bootEpoch * 1000000LL + (tUs - bootTimerUs); }
 
-// "dd/mm/yy,hh:mm:ss,uuuuuu," (date/time text is rebuilt only when the second changes)
+// "hh:mm:ss,uuuuuu," (time text is rebuilt only when the second changes)
 char *putTime(char *p, int64_t eUs) {
   static time_t lastSec = -1;
   static char stamp[20];
@@ -242,7 +244,7 @@ char *putTime(char *p, int64_t eUs) {
   if (sec != lastSec) {
     struct tm tm;
     gmtime_r(&sec, &tm);
-    strftime(stamp, sizeof(stamp), "%d/%m/%y,%H:%M:%S", &tm);
+    strftime(stamp, sizeof(stamp), "%H:%M:%S", &tm);
     lastSec = sec;
   }
   return p + sprintf(p, "%s,%06ld,", stamp, (long)(eUs % 1000000));
@@ -329,9 +331,12 @@ void sdTask(void *) {
   for (;;) {
     bool got = xQueueReceive(sampleQ, &s, pdMS_TO_TICKS(50)) == pdTRUE;
 
-    // Buffer empty and sampling stopped: close the file (sensor lost or restart)
-    if (!got && (stopLogging || !adxlOk)) {
+    // Buffer empty and logging stopped (back to RAW, sensor lost or restart): close the file.
+    // The next ZEROED session starts a fresh file with no leftover gap row.
+    if (!got && (stopLogging || !adxlOk || !logging)) {
       closeLog();
+      gapN = 0;
+      resume = false;
       if (stopLogging) { logClosed = true; vTaskDelete(nullptr); }
     }
 
@@ -340,7 +345,7 @@ void sdTask(void *) {
       lastTry = millis();
       SD.end();
       if (SD.begin(SD_CS, SPI)) {
-        if (SD.totalBytes() - SD.usedBytes() >= SD_MIN_FREE) mounted = true;
+        if (SD.totalBytes() - SD.usedBytes() >= SD_MIN_FREE) { mounted = true; sdState = SD_OK; }
         else { SD.end(); sdState = SD_FULL; Serial.println("SD FULL: swap card, press RST"); }
       }
     }
@@ -354,14 +359,14 @@ void sdTask(void *) {
 
       char *p = wbuf + wlen;
       // shortcut: a gap row still in RAM is lost if the card fails again within 1 s; fine unless that becomes common
-      if (gapN) { p = putTime(p, gapUs); p += sprintf(p, ",,,E,SD gap %lu samples\n", (unsigned long)gapN); gapN = 0; }
-      if (s.drop) { p = putTime(p, e); p += sprintf(p, ",,,E,dropped %lu samples\n", (unsigned long)s.drop); }
+      if (gapN) { p = putTime(p, gapUs); p += sprintf(p, ",,,SD gap %lu samples\n", (unsigned long)gapN); gapN = 0; }
+      if (s.drop) { p = putTime(p, e); p += sprintf(p, ",,,dropped %lu samples\n", (unsigned long)s.drop); }
       if (!wrows) wfirstUs = e;
       p = putTime(p, e);
       p = putG(p, s.x); *p++ = ',';
       p = putG(p, s.y); *p++ = ',';
       p = putG(p, s.z);
-      p += sprintf(p, ",%c,\n", s.mode);
+      *p++ = ','; *p++ = '\n';          // empty note
       wlen = p - wbuf;
       wrows++;
       if (wlen > sizeof(wbuf) - 200 && !writeOut()) sdFailed();  // block full
@@ -382,9 +387,9 @@ void displayTask(void *) {
     struct tm t;
     gmtime_r(&now, &t);
     int16_t x, y, z;
-    bool zr;
+    uint8_t md;
     portENTER_CRITICAL(&dispMux);
-    x = dispX; y = dispY; z = dispZ; zr = dispZeroed;
+    x = dispX; y = dispY; z = dispZ; md = dispMode;
     portEXIT_CRITICAL(&dispMux);
 
     // Errors, most important first. Each has a title and what the user should do.
@@ -399,7 +404,7 @@ void displayTask(void *) {
     oled.setCursor(0, 0);
     oled.printf("%02d/%02d/%02d  %02d:%02d:%02d\n", t.tm_mday, t.tm_mon + 1, t.tm_year % 100,
                 t.tm_hour, t.tm_min, t.tm_sec);
-    oled.print(zr ? "ZEROED" : "RAW");
+    oled.print(md == 2 ? "ZEROED - LOGGING" : md == 1 ? "ZEROING - hold still" : "RAW - not logging");
     oled.setCursor(0, 16);
     if (title) {
       oled.setTextSize(2);
@@ -522,7 +527,7 @@ void loop() {
     lastBtn = btn;
     lastBtnMs = nowMs;
     if (btn == BTN_PRESSED && zeroN < 0) {
-      if (zeroed) { zeroed = false; offX = offY = offZ = 0; Serial.println("Zero OFF (raw)"); }
+      if (zeroed) { zeroed = logging = false; offX = offY = offZ = 0; Serial.println("Zero OFF (raw), logging stopped"); }
       else { zeroN = 0; sumX = sumY = sumZ = 0; }
     }
   }
@@ -564,7 +569,7 @@ void loop() {
         offX = lroundf(sumX / (float)ZERO_SAMPLES);
         offY = lroundf(sumY / (float)ZERO_SAMPLES);
         offZ = lroundf(sumZ / (float)ZERO_SAMPLES);
-        zeroed = true;
+        zeroed = logging = true;
         zeroN = -1;
         Serial.printf("Zero ON. Offsets X %.3f  Y %.3f  Z %.3f g\n", offX * 0.049f, offY * 0.049f, offZ * 0.049f);
       }
@@ -576,13 +581,14 @@ void loop() {
     if (tUs <= lastTUs) tUs = lastTUs + 1;
     lastTUs = tUs;
 
-    Sample s = { tUs, x, y, z, zeroed ? 'Z' : 'R', pendingDrop };
+    if (!logging) { pendingDrop = 0; continue; }  // RAW: display only, nothing logged
+    Sample s = { tUs, x, y, z, pendingDrop };
     if (xQueueSend(sampleQ, &s, 0) == pdTRUE) { pendingDrop = 0; sampleCount++; }
     else { pendingDrop++; lostSamples++; }       // RAM buffer full: card too slow
   }
 
   portENTER_CRITICAL(&dispMux);
-  dispX = x; dispY = y; dispZ = z; dispZeroed = zeroed;
+  dispX = x; dispY = y; dispZ = z; dispMode = zeroed ? 2 : zeroN >= 0 ? 1 : 0;
   portEXIT_CRITICAL(&dispMux);
 
   static uint32_t lastPrintMs;
@@ -590,7 +596,7 @@ void loop() {
     lastPrintMs = nowMs;
     static const char *sdNames[] = { "NO CARD", "OK", "ERROR", "FULL" };
     Serial.printf("X=%.3f Y=%.3f Z=%.3f g  %s  SD=%s  samples=%lu lost=%lu fifoFull=%lu\n",
-                  x * 0.049f, y * 0.049f, z * 0.049f, zeroed ? "ZEROED" : "RAW", sdNames[sdState],
+                  x * 0.049f, y * 0.049f, z * 0.049f, zeroed ? "LOGGING" : zeroN >= 0 ? "ZEROING" : "RAW", sdNames[sdState],
                   (unsigned long)sampleCount, (unsigned long)lostSamples, (unsigned long)fifoFull);
   }
   delay(2);                                       // FIFO holds 20 ms, so 2 ms loses nothing
