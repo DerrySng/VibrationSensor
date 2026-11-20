@@ -47,7 +47,7 @@ Wire the DS1302 to **CLK 16, DAT 17, RST 25**. The kit's own example uses differ
 
 ## OLED display
 
-The display shows the clock, date and the sensor's live X/Y/Z in g, updated 5 times a second:
+The display shows the clock, date and the sensor's live X/Y/Z in g, updated every 0.5 s (`OLED_INTERVAL_MS`):
 
 ```
 09:30:12  ZEROED

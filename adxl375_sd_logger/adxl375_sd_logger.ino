@@ -68,6 +68,7 @@ const int BTN_PRESSED = LOW;
 const uint32_t SAMPLE_INTERVAL_US = 625;   // 1600 Hz: time between the sensor's samples
 const uint32_t FLUSH_INTERVAL_MS  = 1000;  // max data lost on power cut
 const uint32_t PRINT_INTERVAL_MS  = 500;   // Serial preview rate
+const uint32_t OLED_INTERVAL_MS   = 500;   // OLED refresh: new values every 0.5 s
 const float    G_PER_LSB          = 0.049; // ADXL375 datasheet: 49 mg/LSB
 const int      ZERO_SAMPLES       = 160;   // 100 ms average when the zero button is pressed
 const int      BUFFER_SAMPLES     = 4000;  // RAM buffer (~96 KB): rides out 2.5 s of slow SD writes
@@ -235,7 +236,7 @@ struct tm compileTime() {
 }
 
 // ================= Display (runs on core 0 so I2C never stalls sampling) =================
-// Redraws the OLED 5 times a second:
+// Redraws the OLED every 0.5 s (OLED_INTERVAL_MS):
 //   line 1: clock + "ZEROING" (averaging), "ZEROED" (zero on) or "RAW" (zero off)
 //   line 2: date
 //   lines 3-5 (big text): X, Y, Z in g
@@ -262,7 +263,7 @@ void displayTask(void *) {
     oled.setTextSize(2);
     oled.printf("X%7.2f\nY%7.2f\nZ%7.2f", x, y, z);
     oled.display();
-    vTaskDelay(pdMS_TO_TICKS(200));
+    vTaskDelay(pdMS_TO_TICKS(OLED_INTERVAL_MS));
   }
 }
 
