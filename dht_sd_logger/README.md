@@ -5,7 +5,6 @@ A copy of the ADXL375 logger with the accelerometer swapped for a DHT11 temperat
 The sketch is `dht_sd_logger.ino` (in this folder). In the Arduino IDE pick the **ESP32 Dev Module** board. In Library Manager install:
 - **Adafruit SSD1306** (pulls in Adafruit GFX and BusIO)
 - **DHT sensor library** by Adafruit (pulls in Adafruit Unified Sensor)
-- **Ds1302** by Rafa Couto (for the RTC)
 
 Using a DHT22 instead? Change `#define DHT_TYPE DHT11` to `DHT22`.
 
@@ -27,7 +26,6 @@ The button is on GPIO32, which has built-in pull-up and pull-down resistors, so 
 
 For a button to 3V3 instead, set `BTN_PRESSED = HIGH`. The sketch then switches to the internal pull-down automatically.
 
-(GPIO35 was tried first. It has no internal pull resistors, so without an external one it floated and zeroed randomly.)
 
 ## What the button does
 

@@ -1,11 +1,13 @@
 // =====================================================================================
 // ADXL375 -> SD card CSV logger for ESP32-DevKitC (Arduino framework)
-// + DS1302 RTC (on its own pins), SSD1306 OLED, zero button.
+// + DS1302 RTC, SSD1306 OLED, zero button.
 //
 // What it does:
 //   1. On boot, reads the date/time from the DS1302 real-time clock.
-//   2. Sets up the ADXL375 accelerometer (+-200 g) at 1600 samples per second.
-//   3. Creates a new CSV file on the SD card and writes one line per sample.
+//   2. Sets up the ADXL375 accelerometer (+-200 g) at 1600 samples per second, with its
+//      32-sample FIFO on, so every sample the sensor makes is read exactly once.
+//   3. Creates a new CSV file on the SD card and writes one line per sample. Sampling (core 1)
+//      and SD writing (core 0) are separate: samples wait in a RAM buffer while the card is busy.
 //   4. Shows the date, clock and live X/Y/Z values on the OLED.
 //   5. The zero button (GPIO32, e.g. base board KEY1) TOGGLES the zero: first press averages
 //      100 ms of Z readings and uses them as the new zero for Z ONLY (X and Y are always raw),
@@ -13,9 +15,10 @@
 //      to raw values, and so on. The zero is NOT remembered: every reset starts raw.
 //   6. Every NEW upload sets the RTC to the compile time. For an exact second, type the time
 //      in Serial Monitor (115200, line ending "Newline") as  YYYY-MM-DD HH:MM:SS  and press
-//      Enter on that second; the RTC is set and the ESP32 restarts with a new log file.
+//      Enter on that second (or use the RTC Sync app); the RTC is set and the ESP32 restarts
+//      with a new log file. The RTC needs a working coin cell or it loses the time at power-off.
 //
-// Libraries (Library Manager): "Adafruit SSD1306" (pulls in Adafruit GFX + BusIO) and "Ds1302" by Rafa Couto.
+// Libraries (Library Manager): "Adafruit SSD1306" (pulls in Adafruit GFX + BusIO).
 // Everything else ships with the ESP32 board package.
 //
 // Each boot creates a new file named from the RTC, e.g. /20261118_093000.csv
@@ -28,7 +31,6 @@
 #include <Wire.h>              // I2C bus (OLED)
 #include <Adafruit_GFX.h>      // text drawing for the OLED
 #include <Adafruit_SSD1306.h>  // OLED driver
-#include <Ds1302.h>          // "Ds1302" by Rafa Couto (Library Manager)
 #include <Preferences.h>       // small store in flash: remembers which build last set the RTC
 #include <time.h>              // struct tm, mktime, gmtime_r
 #include "esp_timer.h"         // 64-bit microsecond timer (does not wrap like micros())
@@ -45,7 +47,7 @@ const int SD_SCK    = 18;
 const int SD_MISO   = 19;
 const int SD_MOSI   = 23;
 const int SD_CS     = 4;    // base board TF slot is hardwired to GPIO4
-// DS1302 RTC on its own 3 pins (no longer shared with the SD card).
+// DS1302 RTC (bit-banged 3-wire).
 // 16/17 only go to the base board's servo headers and LCD socket: leave those empty.
 const int RTC_CLK   = 16;   // DS1302 CLK (SCLK)
 const int RTC_IO    = 17;   // DS1302 DAT (I/O)
@@ -63,11 +65,13 @@ const int BTN_PRESSED = LOW;
 // ---- end of pins ----
 
 // ---- Settings ----
-const uint32_t SAMPLE_INTERVAL_US = 625;   // 1600 Hz, matches the sensor's output data rate
+const uint32_t SAMPLE_INTERVAL_US = 625;   // 1600 Hz: time between the sensor's samples
 const uint32_t FLUSH_INTERVAL_MS  = 1000;  // max data lost on power cut
 const uint32_t PRINT_INTERVAL_MS  = 500;   // Serial preview rate
+const uint32_t OLED_INTERVAL_MS   = 500;   // OLED refresh: new values every 0.5 s
 const float    G_PER_LSB          = 0.049; // ADXL375 datasheet: 49 mg/LSB
 const int      ZERO_SAMPLES       = 160;   // 100 ms average when the zero button is pressed
+const int      BUFFER_SAMPLES     = 4000;  // RAM buffer (~96 KB): rides out 2.5 s of slow SD writes
 
 // ---- ADXL375 registers (addresses from the datasheet) ----
 const uint8_t REG_DEVID       = 0x00;  // reads 0xE5
@@ -75,6 +79,8 @@ const uint8_t REG_BW_RATE     = 0x2C;  // output data rate
 const uint8_t REG_POWER_CTL   = 0x2D;  // standby / measure
 const uint8_t REG_DATA_FORMAT = 0x31;  // SPI mode and data layout
 const uint8_t REG_DATAX0      = 0x32;  // first of 6 data bytes: X lo, X hi, Y lo, Y hi, Z lo, Z hi
+const uint8_t REG_FIFO_CTL    = 0x38;  // FIFO mode
+const uint8_t REG_FIFO_STATUS = 0x39;  // bits 5:0 = samples waiting in the FIFO
 
 // ---- Hardware objects ----
 SPIClass adxlSPI(HSPI);                                        // second SPI bus, for the ADXL375
@@ -85,7 +91,12 @@ Preferences prefs;
 // ---- Logging state ----
 File logFile;
 char logPath[24];                                // e.g. "/20261118_093000.csv"
-uint32_t nextSampleUs, lastFlushMs, lastPrintMs, sampleCount;
+uint32_t lastPrintMs, sampleCount;
+struct Sample { int64_t tUs; float x, y, z; };   // one reading, in g, with its esp_timer time
+QueueHandle_t sampleQ;                           // RAM buffer: loop() (core 1) -> sdTask (core 0)
+volatile uint32_t lostSamples;   // dropped because the RAM buffer was full (SD card too slow)
+volatile uint32_t fifoFull;      // times the sensor FIFO was found full (samples may have been overwritten)
+volatile bool stopLogging, logClosed;  // used to close the file cleanly before a restart
 int64_t bootEpoch, bootTimerUs;  // RTC time at boot + matching esp_timer value
 
 // ---- Zero (offset) state ----
@@ -94,8 +105,11 @@ bool zeroed = false;             // toggled by the zero button; false = raw valu
 int zeroN = -1;                  // >= 0 while averaging for a zero
 int32_t sumZ;                    // running Z sum while averaging
 
-// Latest values for the display task (core 0); written by loop() (core 1)
-volatile float dispX, dispY, dispZ;
+// Latest values for the display task (core 0); written by loop() (core 1).
+// Always read/written together under dispMux, so X, Y and Z on screen come from the same sample.
+portMUX_TYPE dispMux = portMUX_INITIALIZER_UNLOCKED;
+float dispX, dispY, dispZ;
+uint8_t dispState;               // 0 = RAW, 1 = ZEROING, 2 = ZEROED
 bool oledOk;                     // false if no OLED answered at boot
 
 // ================= ADXL375 =================
@@ -120,31 +134,72 @@ void adxlRead(uint8_t reg, uint8_t *buf, uint8_t len) {
   adxlSPI.endTransaction();
 }
 
-// ================= DS1302 (Ds1302 library by Rafa Couto) =================
-Ds1302 rtc(RTC_CE, RTC_CLK, RTC_IO);
+// ================= DS1302 (3-wire, LSB first) =================
+// The pins are bit-banged by hand because the DS1302 is not real SPI (one shared data line, LSB first).
+
+// Send one byte, lowest bit first. If thenRead is true, the RTC will answer right after,
+// so the data pin is switched to input before the last clock falls.
+void rtcWriteByte(uint8_t b, bool thenRead = false) {
+  pinMode(RTC_IO, OUTPUT);
+  for (int i = 0; i < 8; i++) {
+    digitalWrite(RTC_IO, b & 1);
+    b >>= 1;
+    delayMicroseconds(1);
+    digitalWrite(RTC_CLK, HIGH);   // RTC latches the bit on the rising edge
+    delayMicroseconds(1);
+    if (thenRead && i == 7) pinMode(RTC_IO, INPUT);  // release I/O before the RTC drives it
+    digitalWrite(RTC_CLK, LOW);
+  }
+}
+
+// Receive one byte, lowest bit first. The RTC puts each bit out on the falling clock edge.
+uint8_t rtcReadByte() {
+  uint8_t b = 0;
+  for (int i = 0; i < 8; i++) {
+    delayMicroseconds(1);
+    b |= digitalRead(RTC_IO) << i;
+    digitalWrite(RTC_CLK, HIGH);
+    delayMicroseconds(1);
+    digitalWrite(RTC_CLK, LOW);
+  }
+  return b;
+}
+
+// Start (on = true) or end (on = false) a transfer. Clock must be low when CE changes.
+void rtcSelect(bool on) {
+  digitalWrite(RTC_CLK, LOW);
+  digitalWrite(RTC_CE, on);
+  delayMicroseconds(4);
+}
+
+// The DS1302 stores numbers as BCD: 0x59 means 59.
+uint8_t bcd2dec(uint8_t v) { return (v >> 4) * 10 + (v & 0x0F); }
+uint8_t dec2bcd(uint8_t v) { return ((v / 10) << 4) | (v % 10); }
 
 // Wait (up to 1.1 s) for the RTC's seconds to tick over, so the next read lands right at the
 // start of a second. Without this the boot time could be up to 1 s off.
 void rtcWaitForTick() {
-  Ds1302::DateTime d;
-  rtc.getDateTime(&d);
-  uint8_t s0 = d.second;
+  auto sec = []() { rtcSelect(true); rtcWriteByte(0x81, true); uint8_t v = rtcReadByte(); rtcSelect(false); return v; };
+  uint8_t s0 = sec();
   uint32_t start = millis();
-  do { rtc.getDateTime(&d); } while (d.second == s0 && millis() - start < 1100);
+  while (sec() == s0 && millis() - start < 1100) {}
 }
 
 // Read date and time into t. Returns false if the clock is stopped or not connected.
 bool rtcRead(struct tm &t) {
-  if (rtc.isHalted()) return false;          // clock halted (new / battery lost)
-  Ds1302::DateTime d;
-  rtc.getDateTime(&d);
+  uint8_t r[7];                             // sec, min, hour, date, month, weekday, year
+  rtcSelect(true);
+  rtcWriteByte(0xBF, true);                 // clock burst read
+  for (int i = 0; i < 7; i++) r[i] = rtcReadByte();
+  rtcSelect(false);
+  if (r[0] & 0x80) return false;            // clock halted (new / battery lost)
   t = {};
-  t.tm_sec  = d.second;
-  t.tm_min  = d.minute;
-  t.tm_hour = d.hour;                        // 24 h mode (we always write 24 h)
-  t.tm_mday = d.day;
-  t.tm_mon  = d.month - 1;                   // struct tm months are 0-11
-  t.tm_year = d.year + 100;                  // 2000-2099
+  t.tm_sec  = bcd2dec(r[0] & 0x7F);
+  t.tm_min  = bcd2dec(r[1] & 0x7F);
+  t.tm_hour = bcd2dec(r[2] & 0x3F);          // 24 h mode (we always write 24 h)
+  t.tm_mday = bcd2dec(r[3] & 0x3F);
+  t.tm_mon  = bcd2dec(r[4] & 0x1F) - 1;      // struct tm months are 0-11
+  t.tm_year = bcd2dec(r[6]) + 100;           // 2000-2099
   // All-0xFF / garbage (RTC not connected) fails these checks
   return t.tm_sec < 60 && t.tm_min < 60 && t.tm_hour < 24 &&
          t.tm_mday >= 1 && t.tm_mday <= 31 && t.tm_mon >= 0 && t.tm_mon < 12;
@@ -152,9 +207,18 @@ bool rtcRead(struct tm &t) {
 
 // Set the RTC to t and start it running.
 void rtcWrite(const struct tm &t) {
-  Ds1302::DateTime d = { (uint8_t)(t.tm_year - 100), (uint8_t)(t.tm_mon + 1), (uint8_t)t.tm_mday,
-                         (uint8_t)t.tm_hour, (uint8_t)t.tm_min, (uint8_t)t.tm_sec, (uint8_t)(t.tm_wday + 1) };
-  rtc.setDateTime(&d);
+  rtcSelect(true); rtcWriteByte(0x8E); rtcWriteByte(0x00); rtcSelect(false);  // write-protect off
+  rtcSelect(true);
+  rtcWriteByte(0xBE);                       // clock burst write (all 8 bytes)
+  rtcWriteByte(dec2bcd(t.tm_sec));          // bit7 = 0 -> clock runs
+  rtcWriteByte(dec2bcd(t.tm_min));
+  rtcWriteByte(dec2bcd(t.tm_hour));
+  rtcWriteByte(dec2bcd(t.tm_mday));
+  rtcWriteByte(dec2bcd(t.tm_mon + 1));
+  rtcWriteByte(dec2bcd(t.tm_wday + 1));
+  rtcWriteByte(dec2bcd(t.tm_year - 100));
+  rtcWriteByte(0x00);                       // control: write-protect stays off
+  rtcSelect(false);
 }
 
 // The time this sketch was compiled (from the __DATE__ and __TIME__ macros), used to
@@ -172,7 +236,7 @@ struct tm compileTime() {
 }
 
 // ================= Display (runs on core 0 so I2C never stalls sampling) =================
-// Redraws the OLED 5 times a second:
+// Redraws the OLED every 0.5 s (OLED_INTERVAL_MS):
 //   line 1: clock + "ZEROING" (averaging), "ZEROED" (zero on) or "RAW" (zero off)
 //   line 2: date
 //   lines 3-5 (big text): X, Y, Z in g
@@ -184,16 +248,60 @@ void displayTask(void *) {
     struct tm t;
     gmtime_r(&tt, &t);
 
+    float x, y, z;
+    uint8_t st;
+    portENTER_CRITICAL(&dispMux);
+    x = dispX; y = dispY; z = dispZ; st = dispState;
+    portEXIT_CRITICAL(&dispMux);
+
     oled.clearDisplay();
     oled.setTextSize(1);
     oled.setCursor(0, 0);
     oled.printf("%02d:%02d:%02d  %s\n", t.tm_hour, t.tm_min, t.tm_sec,
-                zeroN >= 0 ? "ZEROING" : zeroed ? "ZEROED" : "RAW");
+                st == 1 ? "ZEROING" : st == 2 ? "ZEROED" : "RAW");
     oled.printf("%04d-%02d-%02d\n", t.tm_year + 1900, t.tm_mon + 1, t.tm_mday);
     oled.setTextSize(2);
-    oled.printf("X%7.2f\nY%7.2f\nZ%7.2f", dispX, dispY, dispZ);
+    oled.printf("X%7.2f\nY%7.2f\nZ%7.2f", x, y, z);
     oled.display();
-    vTaskDelay(pdMS_TO_TICKS(200));
+    vTaskDelay(pdMS_TO_TICKS(OLED_INTERVAL_MS));
+  }
+}
+
+// ================= SD writer (core 0) =================
+// Takes samples out of the RAM buffer, turns them into CSV text in a 4 KB block and writes
+// whole blocks. A slow card only makes the buffer fill up for a moment; sampling never waits.
+void sdTask(void *) {
+  static char buf[4096];
+  size_t len = 0;
+  static char stamp[24];          // "YYYY-MM-DD,HH:MM:SS", rebuilt once a second
+  time_t lastSec = -1;
+  uint32_t lastFlushMs = millis();
+  Sample s;
+  for (;;) {
+    if (xQueueReceive(sampleQ, &s, pdMS_TO_TICKS(100)) == pdTRUE) {
+      // "YYYY-MM-DD,HH:MM:SS,microseconds,x,y,z". Date and time are separate columns so Excel
+      // keeps the seconds; us is the position within that second.
+      int64_t e = bootEpoch * 1000000LL + (s.tUs - bootTimerUs);
+      time_t sec = (time_t)(e / 1000000);
+      if (sec != lastSec) {
+        struct tm tm;
+        gmtime_r(&sec, &tm);
+        snprintf(stamp, sizeof(stamp), "%04d-%02d-%02d,%02d:%02d:%02d", tm.tm_year + 1900, tm.tm_mon + 1,
+                 tm.tm_mday, tm.tm_hour, tm.tm_min, tm.tm_sec);
+        lastSec = sec;
+      }
+      len += snprintf(buf + len, sizeof(buf) - len, "%s,%06ld,%.3f,%.3f,%.3f\n",
+                      stamp, (long)(e % 1000000), s.x, s.y, s.z);
+      if (len > sizeof(buf) - 100) { logFile.write((const uint8_t *)buf, len); len = 0; }  // block full
+    }
+    bool closing = stopLogging && uxQueueMessagesWaiting(sampleQ) == 0;
+    // Push data to the card once a second, so a power cut loses at most ~1 s
+    if (closing || millis() - lastFlushMs >= FLUSH_INTERVAL_MS) {
+      if (len) { logFile.write((const uint8_t *)buf, len); len = 0; }
+      logFile.flush();
+      lastFlushMs = millis();
+    }
+    if (closing) { logFile.close(); logClosed = true; vTaskDelete(nullptr); }
   }
 }
 
@@ -208,7 +316,6 @@ void halt(const char *msg) {
 }
 
 // ================= setup(): runs once at power-on =================
-// OLED first, so errors can be shown on it.
 void setup() {
   Serial.begin(115200);
   delay(500);
@@ -222,9 +329,10 @@ void setup() {
   if (oledOk) { oled.setTextColor(SSD1306_WHITE); oled.clearDisplay(); oled.display(); }
   else Serial.println("WARNING: OLED not found, continuing without display.");
 
-  // RTC pins: CE low = RTC ignores the bus
   pinMode(SD_CS, OUTPUT);  digitalWrite(SD_CS, HIGH);   // keep the SD card deselected
-  rtc.init();
+  // RTC: CE low = RTC ignores the bus
+  pinMode(RTC_CE, OUTPUT); digitalWrite(RTC_CE, LOW);
+  pinMode(RTC_CLK, OUTPUT); digitalWrite(RTC_CLK, LOW);
   struct tm now;
   rtcWaitForTick();
   bool rtcOk = rtcRead(now);
@@ -267,8 +375,8 @@ void setup() {
 
   adxlWrite(REG_DATA_FORMAT, 0x0B); // 4-wire SPI, right-justified, required bits set
   adxlWrite(REG_BW_RATE, 0x0E);     // 1600 Hz output data rate
+  adxlWrite(REG_FIFO_CTL, 0x80);    // FIFO stream mode: keeps the latest 32 samples until we read them
   adxlWrite(REG_POWER_CTL, 0x08);   // measurement mode
-
 
   // SD card on VSPI
   SPI.begin(SD_SCK, SD_MISO, SD_MOSI, -1);
@@ -290,11 +398,13 @@ void setup() {
   logFile.flush();
   Serial.printf("Logging to %s\n", logPath);
 
-  // Start the OLED refresh on core 0; loop() keeps core 1 for sampling
+  // RAM buffer + SD writer and OLED on core 0; loop() keeps core 1 for sampling
+  sampleQ = xQueueCreate(BUFFER_SAMPLES, sizeof(Sample));
+  if (!sampleQ) halt("ERROR: not enough RAM for the sample buffer. Lower BUFFER_SAMPLES.");
+  xTaskCreatePinnedToCore(sdTask, "sd", 8192, nullptr, 2, nullptr, 0);
   if (oledOk) xTaskCreatePinnedToCore(displayTask, "oled", 4096, nullptr, 1, nullptr, 0);
 
-  nextSampleUs = micros();
-  lastFlushMs = lastPrintMs = millis();
+  lastPrintMs = millis();
 }
 
 // Set the RTC from a line typed in Serial Monitor: "YYYY-MM-DD HH:MM:SS".
@@ -318,7 +428,8 @@ void checkSerialTimeSet() {
     }
     t.tm_year -= 1900; t.tm_mon -= 1;
     mktime(&t);                           // fills in tm_wday
-    logFile.close();                      // close the file cleanly before the restart
+    stopLogging = true;                   // the SD task writes what is left and closes the file
+    while (!logClosed) delay(10);
     rtcWrite(t);
     Serial.printf("RTC set to %s. Restarting...\n", line);
     delay(100);
@@ -326,21 +437,11 @@ void checkSerialTimeSet() {
   }
 }
 
-// ================= loop(): one sample per call, every 625 us =================
+// ================= loop(): read every new sample from the sensor's FIFO =================
+// The ADXL375 makes a sample every 625 us on its own clock and keeps up to 32 in its FIFO
+// (20 ms). Each pass reads all waiting samples, so none is read twice or skipped.
 void loop() {
-  if ((int32_t)(micros() - nextSampleUs) < 0) return;  // not time yet
-  int64_t tUs = esp_timer_get_time();                   // timestamp for this sample
-  uint32_t t = micros();
-  nextSampleUs += SAMPLE_INTERVAL_US;
-  // If an SD write stalled us, skip ahead instead of bursting stale samples. The gap shows in the time/us columns.
-  if ((int32_t)(t - nextSampleUs) > (int32_t)SAMPLE_INTERVAL_US) nextSampleUs = t + SAMPLE_INTERVAL_US;
-
-  // Read X, Y, Z: each is 2 bytes, low byte first, signed
-  uint8_t b[6];
-  adxlRead(REG_DATAX0, b, 6);
-  int16_t rx = b[1] << 8 | b[0];
-  int16_t ry = b[3] << 8 | b[2];
-  int16_t rz = b[5] << 8 | b[4];
+  if (stopLogging) return;                        // restarting: stop sampling
 
   // Zero button toggles: raw -> zeroed (average the next ZERO_SAMPLES readings and use them
   // as the new zero) -> raw again, and so on.
@@ -361,48 +462,61 @@ void loop() {
       }
     }
   }
-  if (zeroN >= 0) {
-    sumZ += rz;
-    if (++zeroN == ZERO_SAMPLES) {
-      offZ = sumZ / (float)ZERO_SAMPLES;
-      Serial.printf("Zero ON. Z offset: %.1f counts (%.2f g)\n", offZ, offZ * G_PER_LSB);
-      zeroed = true;
-      zeroN = -1;                                 // done
+
+  uint8_t n;
+  adxlRead(REG_FIFO_STATUS, &n, 1);
+  n &= 0x3F;
+  int64_t tRead = esp_timer_get_time();           // the newest waiting sample is from about now
+  if (n >= 32) fifoFull++;                        // FIFO was full: older samples may be lost
+  static int64_t lastTUs;
+  static float x, y, z;
+  for (uint8_t i = 0; i < n; i++) {
+    delayMicroseconds(5);                         // datasheet: >= 5 us between FIFO reads
+    // Read X, Y, Z (one FIFO entry): each is 2 bytes, low byte first, signed
+    uint8_t b[6];
+    adxlRead(REG_DATAX0, b, 6);
+    int16_t rx = b[1] << 8 | b[0];
+    int16_t ry = b[3] << 8 | b[2];
+    int16_t rz = b[5] << 8 | b[4];
+
+    if (zeroN >= 0) {
+      sumZ += rz;
+      if (++zeroN == ZERO_SAMPLES) {
+        offZ = sumZ / (float)ZERO_SAMPLES;
+        Serial.printf("Zero ON. Z offset: %.1f counts (%.2f g)\n", offZ, offZ * G_PER_LSB);
+        zeroed = true;
+        zeroN = -1;                               // done
+      }
     }
+
+    // Raw counts -> g, after removing the zero offset
+    x = rx * G_PER_LSB;                           // X and Y are always raw
+    y = ry * G_PER_LSB;
+    z = (rz - offZ) * G_PER_LSB;
+
+    // Time of this sample: older FIFO entries are 625 us apart, counting back from now
+    int64_t tUs = tRead - (int64_t)(n - 1 - i) * SAMPLE_INTERVAL_US;
+    if (tUs <= lastTUs) tUs = lastTUs + 1;        // keep timestamps in order
+    lastTUs = tUs;
+
+    Sample s = { tUs, x, y, z };
+    if (xQueueSend(sampleQ, &s, 0) != pdTRUE) lostSamples++;  // buffer full: SD can't keep up
+    else sampleCount++;
   }
 
-  // Raw counts -> g, after removing the zero offset
-  float x = rx * G_PER_LSB;                       // X and Y are always raw
-  float y = ry * G_PER_LSB;
-  float z = (rz - offZ) * G_PER_LSB;
-  dispX = x; dispY = y; dispZ = z;                // hand the latest values to the OLED task
+  // Hand the latest values to the OLED task, all three at once
+  portENTER_CRITICAL(&dispMux);
+  dispX = x; dispY = y; dispZ = z;
+  dispState = zeroN >= 0 ? 1 : zeroed ? 2 : 0;
+  portEXIT_CRITICAL(&dispMux);
 
-  // Write one CSV line: "YYYY-MM-DD,HH:MM:SS,microseconds,x,y,z"
-  // Date and time are separate columns so Excel keeps the seconds; us is the position within that second.
-  int64_t e = bootEpoch * 1000000LL + (tUs - bootTimerUs);
-  time_t sec = (time_t)(e / 1000000);
-  static time_t lastSec = -1;
-  static char stamp[24];                          // "YYYY-MM-DD,HH:MM:SS", rebuilt once a second
-  if (sec != lastSec) {
-    struct tm tm;
-    gmtime_r(&sec, &tm);
-    snprintf(stamp, sizeof(stamp), "%04d-%02d-%02d,%02d:%02d:%02d", tm.tm_year + 1900, tm.tm_mon + 1,
-             tm.tm_mday, tm.tm_hour, tm.tm_min, tm.tm_sec);
-    lastSec = sec;
-  }
-  logFile.printf("%s,%06ld,%.3f,%.3f,%.3f\n", stamp, (long)(e % 1000000), x, y, z);
-  sampleCount++;
-
-  // Push buffered data to the card once a second, so a power cut loses at most ~1 s
-  if (now - lastFlushMs >= FLUSH_INTERVAL_MS) {
-    logFile.flush();
-    lastFlushMs = now;
-  }
   // Serial preview twice a second (printing every sample would be far too slow)
   if (now - lastPrintMs >= PRINT_INTERVAL_MS) {
-    Serial.printf("X=%7.2f g  Y=%7.2f g  Z=%7.2f g  samples=%lu\n", x, y, z, (unsigned long)sampleCount);
+    Serial.printf("X=%7.2f g  Y=%7.2f g  Z=%7.2f g  samples=%lu  lost=%lu  fifoFull=%lu\n", x, y, z,
+                  (unsigned long)sampleCount, (unsigned long)lostSamples, (unsigned long)fifoFull);
     lastPrintMs = now;
   }
 
   checkSerialTimeSet();                           // set the RTC from a typed time, then restart
+  delay(2);                                       // FIFO holds 20 ms, so a 2 ms nap loses nothing
 }
