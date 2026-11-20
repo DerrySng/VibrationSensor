@@ -1,6 +1,6 @@
 // =====================================================================================
 // ADXL375 -> SD card CSV logger for ESP32-DevKitC (Arduino framework)
-// + DS1302 RTC (on its own pins), SSD1306 OLED, zero button.
+// + DS1302 RTC, SSD1306 OLED, zero button.
 //
 // What it does:
 //   1. On boot, reads the date/time from the DS1302 real-time clock.
@@ -15,7 +15,8 @@
 //      to raw values, and so on. The zero is NOT remembered: every reset starts raw.
 //   6. Every NEW upload sets the RTC to the compile time. For an exact second, type the time
 //      in Serial Monitor (115200, line ending "Newline") as  YYYY-MM-DD HH:MM:SS  and press
-//      Enter on that second; the RTC is set and the ESP32 restarts with a new log file.
+//      Enter on that second (or use the RTC Sync app); the RTC is set and the ESP32 restarts
+//      with a new log file. The RTC needs a working coin cell or it loses the time at power-off.
 //
 // Libraries (Library Manager): "Adafruit SSD1306" (pulls in Adafruit GFX + BusIO).
 // Everything else ships with the ESP32 board package.
@@ -46,7 +47,7 @@ const int SD_SCK    = 18;
 const int SD_MISO   = 19;
 const int SD_MOSI   = 23;
 const int SD_CS     = 4;    // base board TF slot is hardwired to GPIO4
-// DS1302 RTC on its own 3 pins (no longer shared with the SD card).
+// DS1302 RTC (bit-banged 3-wire).
 // 16/17 only go to the base board's servo headers and LCD socket: leave those empty.
 const int RTC_CLK   = 16;   // DS1302 CLK (SCLK)
 const int RTC_IO    = 17;   // DS1302 DAT (I/O)
@@ -314,7 +315,6 @@ void halt(const char *msg) {
 }
 
 // ================= setup(): runs once at power-on =================
-// OLED first, so errors can be shown on it.
 void setup() {
   Serial.begin(115200);
   delay(500);
@@ -328,8 +328,8 @@ void setup() {
   if (oledOk) { oled.setTextColor(SSD1306_WHITE); oled.clearDisplay(); oled.display(); }
   else Serial.println("WARNING: OLED not found, continuing without display.");
 
-  // RTC pins: CE low = RTC ignores the bus
   pinMode(SD_CS, OUTPUT);  digitalWrite(SD_CS, HIGH);   // keep the SD card deselected
+  // RTC: CE low = RTC ignores the bus
   pinMode(RTC_CE, OUTPUT); digitalWrite(RTC_CE, LOW);
   pinMode(RTC_CLK, OUTPUT); digitalWrite(RTC_CLK, LOW);
   struct tm now;
@@ -376,7 +376,6 @@ void setup() {
   adxlWrite(REG_BW_RATE, 0x0E);     // 1600 Hz output data rate
   adxlWrite(REG_FIFO_CTL, 0x80);    // FIFO stream mode: keeps the latest 32 samples until we read them
   adxlWrite(REG_POWER_CTL, 0x08);   // measurement mode
-
 
   // SD card on VSPI
   SPI.begin(SD_SCK, SD_MISO, SD_MOSI, -1);

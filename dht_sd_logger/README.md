@@ -26,7 +26,6 @@ The button is on GPIO32, which has built-in pull-up and pull-down resistors, so 
 
 For a button to 3V3 instead, set `BTN_PRESSED = HIGH`. The sketch then switches to the internal pull-down automatically.
 
-(GPIO35 was tried first. It has no internal pull resistors, so without an external one it floated and zeroed randomly.)
 
 ## What the button does
 

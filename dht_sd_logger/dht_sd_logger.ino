@@ -24,6 +24,7 @@
 // Setting the clock to the second: open Serial Monitor (115200, line ending "Newline"),
 // type the time as  YYYY-MM-DD HH:MM:SS  and press Enter exactly as your reference clock
 // reaches that second. The RTC is set and the ESP32 restarts with a new log file.
+// Or use the RTC Sync app. The RTC needs a working coin cell or it loses the time at power-off.
 // =====================================================================================
 
 #include <SPI.h>               // SPI bus (SD card)
@@ -42,7 +43,7 @@ const int SD_SCK    = 18;
 const int SD_MISO   = 19;
 const int SD_MOSI   = 23;
 const int SD_CS     = 4;    // base board TF slot is hardwired to GPIO4
-// DS1302 RTC on its own 3 pins (no longer shared with the SD card).
+// DS1302 RTC (bit-banged 3-wire).
 // 16/17 only go to the base board's servo headers and LCD socket: leave those empty.
 const int RTC_CLK   = 16;   // DS1302 CLK (SCLK)
 const int RTC_IO    = 17;   // DS1302 DAT (I/O)
@@ -221,7 +222,6 @@ void halt(const char *msg) {
 }
 
 // ================= setup(): runs once at power-on =================
-// OLED first, so errors can be shown on it.
 void setup() {
   Serial.begin(115200);
   delay(500);
@@ -236,8 +236,8 @@ void setup() {
   if (oledOk) { oled.setTextColor(SSD1306_WHITE); oled.clearDisplay(); oled.display(); }
   else Serial.println("WARNING: OLED not found, continuing without display.");
 
-  // RTC pins: CE low = RTC ignores the bus
   pinMode(SD_CS, OUTPUT);  digitalWrite(SD_CS, HIGH);   // keep the SD card deselected
+  // RTC: CE low = RTC ignores the bus
   pinMode(RTC_CE, OUTPUT); digitalWrite(RTC_CE, LOW);
   pinMode(RTC_CLK, OUTPUT); digitalWrite(RTC_CLK, LOW);
   struct tm now;

@@ -34,7 +34,7 @@ Pins are checked against the base board schematic. The TF slot is soldered to GP
 
 ### RTC pins
 
-The DS1302 has its own three pins: CLK 16, DAT 17, RST/CE 25. GPIO16 and 17 also go to the base board's servo headers and LCD/OLED socket, so leave those empty. (Earlier versions shared the SD card's 18/23. That's no longer needed.)
+The DS1302 has its own three pins: CLK 16, DAT 17, RST/CE 25. GPIO16 and 17 also go to the base board's servo headers and LCD/OLED socket, so leave those empty.
 
 ## Setting the RTC
 
