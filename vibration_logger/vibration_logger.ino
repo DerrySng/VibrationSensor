@@ -6,7 +6,7 @@
 //     so a slow card never stops sampling.
 //   * Logging only runs while ZEROED. Power-on / RST starts RAW: the OLED shows live data
 //     but nothing is written. KEY1 (GPIO32) press: average 1600 samples (1 s) of X, Y, Z,
-//     subtract them, open a new CSV file and log. Next press: close the file, back to RAW.
+//     subtract them so X0 Y0 Z1 g at rest (Z_REST_G), open a new CSV file and log. Next press: close the file, back to RAW.
 //     Each press into ZEROED repeats this with a fresh average and a new file.
 //   * Files are named from the RTC (the date is only in the name), e.g. /20261120_104205.csv.
 //     One file per ZEROED session. Only if it nears FAT32's 4 GB limit (~17 h) does a new
@@ -75,6 +75,7 @@ const uint32_t ADXL_CHECK_MS    = 500;    // how often a working sensor's ID is 
 const uint64_t SD_MIN_FREE      = 1048576; // below 1 MB free the card counts as full
 const uint32_t MAX_FILE_BYTES   = 4000000000UL; // FAT32 can't hold a file over 4 GiB: start a new one first
 const int      ZERO_SAMPLES     = 1600;   // 1 s average for the zero
+const int      Z_REST_MG        = 1000;   // after zeroing Z reads this at rest (1 g = gravity); X/Y read 0
 const int      BUFFER_SAMPLES   = 4000;   // RAM buffer: ~2.5 s of samples if the card stalls
 const char    *CSV_HEADER       = "time,us,x_g,y_g,z_g\n";
 
@@ -253,8 +254,8 @@ char *putTime(char *p, int64_t eUs) {
 }
 
 // Counts -> g with 3 decimals. 1 count = 49 mg exactly, so integer maths gives the exact value.
-char *putG(char *p, int counts) {
-  int mg = counts * 49;
+char *putG(char *p, int counts, int addMg = 0) {
+  int mg = counts * 49 + addMg;
   if (mg < 0) { *p++ = '-'; mg = -mg; }
   return p + sprintf(p, "%d.%03d", mg / 1000, mg % 1000);
 }
@@ -367,7 +368,7 @@ void sdTask(void *) {
       p = putTime(p, e);
       p = putG(p, s.x); *p++ = ',';
       p = putG(p, s.y); *p++ = ',';
-      p = putG(p, s.z);
+      p = putG(p, s.z, Z_REST_MG);       // only zeroed samples are logged
       *p++ = '\n';
       wlen = p - wbuf;
       wrows++;
@@ -417,7 +418,7 @@ void displayTask(void *) {
       oled.println(l2);
     } else {
       oled.setTextSize(2);
-      oled.printf("X%8.3f\nY%8.3f\nZ%8.3f", x * 0.049f, y * 0.049f, z * 0.049f);
+      oled.printf("X%8.3f\nY%8.3f\nZ%8.3f", x * 0.049f, y * 0.049f, z * 0.049f + (md == 2 ? Z_REST_MG / 1000.0f : 0));
     }
     oled.display();
     vTaskDelay(pdMS_TO_TICKS(OLED_MS));
@@ -434,6 +435,7 @@ void setup() {
 
   Wire.begin(OLED_SDA, OLED_SCL);
   oledOk = oled.begin(SSD1306_SWITCHCAPVCC, OLED_ADDR);
+  oled.setRotation(2);                     // screen upside down (180 deg); 0 = normal
   if (oledOk) { oled.setTextColor(SSD1306_WHITE); oled.clearDisplay(); oled.display(); }
   else Serial.println("OLED not found, logging without display.");
 
@@ -598,7 +600,7 @@ void loop() {
     lastPrintMs = nowMs;
     static const char *sdNames[] = { "NO CARD", "OK", "ERROR", "FULL" };
     Serial.printf("X=%.3f Y=%.3f Z=%.3f g  %s  SD=%s  samples=%lu lost=%lu fifoFull=%lu\n",
-                  x * 0.049f, y * 0.049f, z * 0.049f, zeroed ? "LOGGING" : zeroN >= 0 ? "ZEROING" : "RAW", sdNames[sdState],
+                  x * 0.049f, y * 0.049f, z * 0.049f + (zeroed ? Z_REST_MG / 1000.0f : 0), zeroed ? "LOGGING" : zeroN >= 0 ? "ZEROING" : "RAW", sdNames[sdState],
                   (unsigned long)sampleCount, (unsigned long)lostSamples, (unsigned long)fifoFull);
   }
   delay(2);                                       // FIFO holds 20 ms, so 2 ms loses nothing

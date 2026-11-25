@@ -10,7 +10,7 @@ Pins are the same as `adxl375_sd_logger` (table in the main README): ADXL375 on 
 Logging only runs while **ZEROED**. Every power-on or RST starts in **RAW**: the OLED shows live X/Y/Z, but nothing goes to the SD card.
 
 1. Press KEY1. The OLED shows `ZEROING - hold still` while the sketch averages 1600 samples (1 s) of X, Y and Z.
-2. The average is subtracted from all three axes, a new CSV file is created, and logging starts (`ZEROED - LOGGING`).
+2. The average is subtracted from all three axes so at rest it reads X 0, Y 0, Z 1 g (gravity; `Z_REST_MG`), a new CSV file is created, and logging starts (`ZEROED - LOGGING`).
 3. Press KEY1 again. The file is closed and it goes back to RAW (`RAW - not logging`).
 4. The next press repeats steps 1 and 2 with a fresh average and a new file.
 
@@ -25,7 +25,7 @@ time,us,x_g,y_g,z_g
 ```
 
 - `us`: microsecond within that second (samples are 625 us apart).
-- Values in g, 3 decimals (the sensor counts in exact 0.049 g steps), with the zero subtracted.
+- Values in g, 3 decimals (the sensor counts in exact 0.049 g steps), with the zero subtracted (Z at rest = 1.000).
 - Lost samples are not written to the CSV. Serial prints `SD gap N samples` or `dropped N samples`, and the jump in `time`/`us` shows where.
 
 About 39 bytes a row, so about 225 MB an hour.
@@ -37,7 +37,7 @@ About 39 bytes a row, so about 225 MB an hour.
 ZEROED - LOGGING
 X   0.049
 Y  -0.098
-Z   0.000
+Z   1.000
 ```
 
 Values are the latest sample read from the sensor, not from the SD card. When something is wrong, X/Y/Z are hidden and the screen says what to do:
