@@ -11,14 +11,14 @@
 //   * Files are named from the RTC (the date is only in the name), e.g. /20261120_104205.csv.
 //     One file per ZEROED session. Only if it nears FAT32's 4 GB limit (~17 h) does a new
 //     file start, so data is never lost to the limit.
-//     Columns: time (hh:mm:ss), us (0-999999 within that second), x_g, y_g, z_g (3 decimals), note
+//     Columns: time (hh:mm:ss), us (0-999999 within that second), x_g, y_g, z_g (3 decimals)
 //   * OLED every 0.5 s: date, time, RAW / ZEROING / LOGGING, then the latest X, Y, Z.
 //     Errors replace X/Y/Z so nobody thinks it is logging when it is not:
 //       ADXL375 not found  -> nothing logged, retried every 1 s, new file when it is back
 //       NO SD CARD         -> retried every 2 s, logging starts when a card is inserted
-//       SD ERROR           -> retried every 2 s, same file continued with a gap row
+//       SD ERROR           -> retried every 2 s, same file continued
 //       SD FULL            -> logging stops until a new card + RST
-//   * Error rows in the CSV have empty x/y/z and a note: "SD gap N samples", "dropped N samples".
+//   * Lost samples ("SD gap N samples", "dropped N samples") are reported on Serial, not in the CSV.
 //   * Every new upload sets the RTC to the compile time. For the exact second send
 //     "YYYY-MM-DD HH:MM:SS" on Serial (115200, Newline), or use the RTC Sync app.
 //     RTC problems and a missing OLED are reported on Serial only.
@@ -76,7 +76,7 @@ const uint64_t SD_MIN_FREE      = 1048576; // below 1 MB free the card counts as
 const uint32_t MAX_FILE_BYTES   = 4000000000UL; // FAT32 can't hold a file over 4 GiB: start a new one first
 const int      ZERO_SAMPLES     = 1600;   // 1 s average for the zero
 const int      BUFFER_SAMPLES   = 4000;   // RAM buffer: ~2.5 s of samples if the card stalls
-const char    *CSV_HEADER       = "time,us,x_g,y_g,z_g,note\n";
+const char    *CSV_HEADER       = "time,us,x_g,y_g,z_g\n";
 
 // ---- ADXL375 registers ----
 const uint8_t REG_DEVID = 0x00, REG_BW_RATE = 0x2C, REG_POWER_CTL = 0x2D,
@@ -361,15 +361,14 @@ void sdTask(void *) {
       if (!logFile) { loseRows(1 + s.drop, e); continue; }
 
       char *p = wbuf + wlen;
-      // shortcut: a gap row still in RAM is lost if the card fails again within 1 s; fine unless that becomes common
-      if (gapN) { p = putTime(p, gapUs); p += sprintf(p, ",,,SD gap %lu samples\n", (unsigned long)gapN); gapN = 0; }
-      if (s.drop) { p = putTime(p, e); p += sprintf(p, ",,,dropped %lu samples\n", (unsigned long)s.drop); }
+      if (gapN) { Serial.printf("SD gap %lu samples\n", (unsigned long)gapN); gapN = 0; }
+      if (s.drop) Serial.printf("dropped %lu samples\n", (unsigned long)s.drop);
       if (!wrows) wfirstUs = e;
       p = putTime(p, e);
       p = putG(p, s.x); *p++ = ',';
       p = putG(p, s.y); *p++ = ',';
       p = putG(p, s.z);
-      *p++ = ','; *p++ = '\n';          // empty note
+      *p++ = '\n';
       wlen = p - wbuf;
       wrows++;
       if (wlen > sizeof(wbuf) - 200 && !writeOut()) sdFailed();  // block full

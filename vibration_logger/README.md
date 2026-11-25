@@ -19,18 +19,16 @@ Logging only runs while **ZEROED**. Every power-on or RST starts in **RAW**: the
 Each file is named from the RTC at the moment logging starts, e.g. `/20261120_104206.csv`. The date only appears in the file name. Each ZEROED session is one file. FAT32 can't hold a file over 4 GB (about 17 h of logging), so only if a session gets that long does a new file start automatically. A run past midnight stays in one file, so the date in the name is the date logging started. If the name already exists, `_1`, `_2` ... is added, so nothing is overwritten.
 
 ```
-time,us,x_g,y_g,z_g,note
-10:42:06,000000,0.049,-0.098,0.000,
-10:42:06,000625,0.000,-0.049,0.049,
-10:42:07,312500,,,,SD gap 3200 samples
-10:42:09,000000,,,,dropped 120 samples
+time,us,x_g,y_g,z_g
+10:42:06,000000,0.049,-0.098,0.000
+10:42:06,000625,0.000,-0.049,0.049
 ```
 
 - `us`: microsecond within that second (samples are 625 us apart).
 - Values in g, 3 decimals (the sensor counts in exact 0.049 g steps), with the zero subtracted.
-- Error rows have empty x/y/z and say what was lost in `note`. Their time is where the gap starts.
+- Lost samples are not written to the CSV. Serial prints `SD gap N samples` or `dropped N samples`, and the jump in `time`/`us` shows where.
 
-About 40 bytes a row, so about 230 MB an hour.
+About 39 bytes a row, so about 225 MB an hour.
 
 ## OLED (every 0.5 s, `OLED_MS`)
 
