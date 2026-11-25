@@ -435,6 +435,7 @@ void setup() {
 
   Wire.begin(OLED_SDA, OLED_SCL);
   oledOk = oled.begin(SSD1306_SWITCHCAPVCC, OLED_ADDR);
+  oled.setRotation(2);                     // screen upside down (180 deg); 0 = normal
   if (oledOk) { oled.setTextColor(SSD1306_WHITE); oled.clearDisplay(); oled.display(); }
   else Serial.println("OLED not found, logging without display.");
 
